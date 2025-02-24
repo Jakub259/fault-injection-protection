@@ -1,4 +1,4 @@
-
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -12,9 +12,22 @@ namespace {
 
 size_t harden_fn(Function &function) {
   [[maybe_unused]] LLVMContext &Ctx = function.getContext();
-  errs() << __func__ << "\nHello " << function.getName() << "\n";
-  return 0;
 
+  // In 99.9% cases there should be no more than one
+  SmallVector<llvm::Instruction *, 1> opaque_calls;
+
+  // find values to harden
+  for (auto &basic_block : function)
+    for (auto &instruction : basic_block) {
+      if (auto *call = dyn_cast<CallInst>(&instruction)) {
+        if (auto *called_op = call->getCalledOperand()) {
+          if (called_op->getName().starts_with("internal_cfip_opaque_call_"))
+            opaque_calls.push_back(&instruction);
+        }
+      }
+    }
+
+  return opaque_calls.size();
 }
 struct Cfip : PassInfoMixin<Cfip> {
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
