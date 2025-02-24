@@ -1,6 +1,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/Reg2Mem.h"
@@ -34,6 +35,22 @@ size_t harden_fn(Function &function) {
       }
     }
 
+  // create value to store state of program
+  llvm::Instruction *fault_detected_alloc;
+  if (!opaque_calls.empty()) {
+    llvm::Instruction *first_instruction = &*inst_begin(function);
+    /* auto *allocaInst = new llvm::AllocaInst(Type::getInt1Ty); */
+    llvm::IRBuilder<> builder(
+        first_instruction); // Create IRBuilder at first instruction
+
+    llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
+
+    fault_detected_alloc =
+        builder.CreateAlloca(i1_type, nullptr, "fault_detected");
+    builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+                        fault_detected_alloc);
+  }
+
   for (auto &opaque_call : opaque_calls) {
     // rustc attribute hides value behind a call to prevent over-optimizations
     // it's no longer needed thus we unwrap them:
@@ -46,18 +63,18 @@ size_t harden_fn(Function &function) {
     [[maybe_unused]] auto store_critical_value =
         builder.CreateStore(opaque_call->getOperand(0), opaque_value_alloca);
 
-    llvm::LoadInst *first_critical_value_use = builder.CreateLoad(
+    llvm::LoadInst *critical_value_load = builder.CreateLoad(
         opaque_call->getType(), opaque_value_alloca, false, "replacement");
 
     if (!opaque_call->use_empty()) {
-      opaque_call->replaceAllUsesWith(first_critical_value_use);
+      opaque_call->replaceAllUsesWith(critical_value_load);
       opaque_call->eraseFromParent();
     }
 
     // now that the value is extracted we find all it's users
     // but all users of my users are also my users (recursively)
     SetVector<Value *> ALLUsers{};
-    getUsersRec(first_critical_value_use, ALLUsers);
+    getUsersRec(critical_value_load, ALLUsers);
 
   }
 
