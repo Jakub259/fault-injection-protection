@@ -2,7 +2,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
-#include <functional>
+#include "llvm/Transforms/Scalar/Reg2Mem.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -36,7 +36,9 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                 [](StringRef Name, FunctionPassManager &FPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
+                    FPM.addPass(RegToMemPass());
                     FPM.addPass(Cfip());
+                    return true;
                   }
                   return false;
                 });
