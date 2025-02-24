@@ -18,6 +18,45 @@ void getUsersRec(Value *const U, SetVector<Value *> &OutSV) {
   }
 }
 
+void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *instruction) {
+  // before: x = a + b
+  // after:
+  //    tmp1 = a + b
+  //    tmp2 = a + b
+  //    local_fault_detected = tmp1 != tmp2
+  //    fault_detected |= local_fault_detected
+  if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(instruction)) {
+    errs() << "Adding redundancy to: " << *instruction << "\n";
+
+    IRBuilder<> Builder(binOp);
+
+    auto *tmp1 = binOp->clone();
+    tmp1->setName("tmp1");
+    Builder.Insert(tmp1);
+
+    auto *tmp2 = binOp->clone();
+    tmp2->setName("tmp2");
+    Builder.Insert(tmp2);
+
+    // tmp1 != tmp2
+    Value *local_fault_detected =
+        Builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
+
+    // fault_detected |= local_fault_detected
+    auto fault_detected =
+        Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
+
+    Value *updated_fault_detection_state =
+        Builder.CreateOr(fault_detected, local_fault_detected);
+
+    Builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
+
+    // Replace original instruction with tmp1
+    binOp->replaceAllUsesWith(tmp1);
+    binOp->eraseFromParent();
+  }
+}
+
 size_t harden_fn(Function &function) {
   [[maybe_unused]] LLVMContext &Ctx = function.getContext();
 
@@ -76,6 +115,9 @@ size_t harden_fn(Function &function) {
     SetVector<Value *> ALLUsers{};
     getUsersRec(critical_value_use, ALLUsers);
 
+    for (auto *user : ALLUsers) {
+      add_redundancy(fault_detected_ptr, user);
+    }
   }
 
   return opaque_calls.size();
