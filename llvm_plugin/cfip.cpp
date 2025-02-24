@@ -27,6 +27,27 @@ size_t harden_fn(Function &function) {
       }
     }
 
+  for (auto &opaque_call : opaque_calls) {
+    // rustc attribute hides value behind a call to prevent over-optimizations
+    // it's no longer needed thus we unwrap them:
+    // before: critical_var = opaque_call(start_value)
+    // after: critical_var = start_value
+    llvm::IRBuilder<> builder(opaque_call);
+    // create space for the value
+    auto *opaque_value_alloca =
+        builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
+    [[maybe_unused]] auto first_critical_value_use =
+        builder.CreateStore(opaque_call->getOperand(0), opaque_value_alloca);
+
+    llvm::LoadInst *load_value = builder.CreateLoad(
+        opaque_call->getType(), opaque_value_alloca, false, "replacement");
+
+    if (!opaque_call->use_empty()) {
+      opaque_call->replaceAllUsesWith(load_value);
+      opaque_call->eraseFromParent();
+    }
+  }
+
   return opaque_calls.size();
 }
 struct Cfip : PassInfoMixin<Cfip> {
