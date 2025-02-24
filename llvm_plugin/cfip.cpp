@@ -1,3 +1,4 @@
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -9,6 +10,12 @@ using namespace llvm;
 
 namespace {
 
+void getUsersRec(Value *const U, SetVector<Value *> &OutSV) {
+  OutSV.insert(U);
+  for (auto *user : U->users()) {
+    getUsersRec(user, OutSV);
+  }
+}
 
 size_t harden_fn(Function &function) {
   [[maybe_unused]] LLVMContext &Ctx = function.getContext();
@@ -36,16 +43,22 @@ size_t harden_fn(Function &function) {
     // create space for the value
     auto *opaque_value_alloca =
         builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
-    [[maybe_unused]] auto first_critical_value_use =
+    [[maybe_unused]] auto store_critical_value =
         builder.CreateStore(opaque_call->getOperand(0), opaque_value_alloca);
 
-    llvm::LoadInst *load_value = builder.CreateLoad(
+    llvm::LoadInst *first_critical_value_use = builder.CreateLoad(
         opaque_call->getType(), opaque_value_alloca, false, "replacement");
 
     if (!opaque_call->use_empty()) {
-      opaque_call->replaceAllUsesWith(load_value);
+      opaque_call->replaceAllUsesWith(first_critical_value_use);
       opaque_call->eraseFromParent();
     }
+
+    // now that the value is extracted we find all it's users
+    // but all users of my users are also my users (recursively)
+    SetVector<Value *> ALLUsers{};
+    getUsersRec(first_critical_value_use, ALLUsers);
+
   }
 
   return opaque_calls.size();
