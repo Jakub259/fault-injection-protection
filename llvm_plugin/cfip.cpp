@@ -174,6 +174,7 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                 [](StringRef Name, FunctionPassManager &FPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
+                    // consider removing this later
                     FPM.addPass(RegToMemPass());
                     FPM.addPass(Cfip());
                     return true;
