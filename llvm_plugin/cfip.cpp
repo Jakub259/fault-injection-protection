@@ -36,7 +36,7 @@ size_t harden_fn(Function &function) {
     }
 
   // create value to store state of program
-  llvm::Instruction *fault_detected_alloc;
+  llvm::Instruction *fault_detected_ptr;
   if (!opaque_calls.empty()) {
     llvm::Instruction *first_instruction = &*inst_begin(function);
     /* auto *allocaInst = new llvm::AllocaInst(Type::getInt1Ty); */
@@ -45,10 +45,10 @@ size_t harden_fn(Function &function) {
 
     llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
 
-    fault_detected_alloc =
+    fault_detected_ptr =
         builder.CreateAlloca(i1_type, nullptr, "fault_detected");
     builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
-                        fault_detected_alloc);
+                        fault_detected_ptr);
   }
 
   for (auto &opaque_call : opaque_calls) {
@@ -58,23 +58,23 @@ size_t harden_fn(Function &function) {
     // after: critical_var = start_value
     llvm::IRBuilder<> builder(opaque_call);
     // create space for the value
-    auto *opaque_value_alloca =
+    auto *opaque_value_ptr =
         builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
     [[maybe_unused]] auto store_critical_value =
-        builder.CreateStore(opaque_call->getOperand(0), opaque_value_alloca);
+        builder.CreateStore(opaque_call->getOperand(0), opaque_value_ptr);
 
-    llvm::LoadInst *critical_value_load = builder.CreateLoad(
-        opaque_call->getType(), opaque_value_alloca, false, "replacement");
+    llvm::LoadInst *critical_value_use = builder.CreateLoad(
+        opaque_call->getType(), opaque_value_ptr, false, "replacement");
 
     if (!opaque_call->use_empty()) {
-      opaque_call->replaceAllUsesWith(critical_value_load);
+      opaque_call->replaceAllUsesWith(critical_value_use);
       opaque_call->eraseFromParent();
     }
 
     // now that the value is extracted we find all it's users
     // but all users of my users are also my users (recursively)
     SetVector<Value *> ALLUsers{};
-    getUsersRec(critical_value_load, ALLUsers);
+    getUsersRec(critical_value_use, ALLUsers);
 
   }
 
