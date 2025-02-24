@@ -120,8 +120,28 @@ size_t harden_fn(Function &function) {
     }
   }
 
+  if (!opaque_calls.empty()) {
+    // add a error handling basic block
+    BasicBlock *error_bb = BasicBlock::Create(Ctx, "error_handling", &function);
+    {
+      IRBuilder<> builder(error_bb);
+      builder.CreateCall(
+          Intrinsic::getDeclaration(function.getParent(), Intrinsic::trap));
+      builder.CreateUnreachable();
+    }
+
+    // to finalize the protection by adding a check before any return
+    SmallVector<llvm::Instruction *, 1> return_instructions;
+    for (inst_iterator inst = inst_begin(function),
+                       last_inst = inst_end(function);
+         inst != last_inst; ++inst)
+      if (auto *ret_inst = dyn_cast<ReturnInst>(&*inst))
+        return_instructions.push_back(ret_inst);
+  }
+
   return opaque_calls.size();
 }
+
 struct Cfip : PassInfoMixin<Cfip> {
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
     if (harden_fn(F))
