@@ -132,11 +132,23 @@ size_t harden_fn(Function &function) {
 
     // to finalize the protection by adding a check before any return
     SmallVector<llvm::Instruction *, 1> return_instructions;
-    for (inst_iterator inst = inst_begin(function),
-                       last_inst = inst_end(function);
-         inst != last_inst; ++inst)
-      if (auto *ret_inst = dyn_cast<ReturnInst>(&*inst))
+    for (auto &basic_block : function) {
+      if (auto *ret_inst = dyn_cast<ReturnInst>(basic_block.getTerminator()))
         return_instructions.push_back(ret_inst);
+    }
+    for (auto ret_inst : return_instructions) {
+      BasicBlock *ret_bb = ret_inst->getParent();
+      BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
+
+      // Insert condition before jumping to return or trap
+      IRBuilder<> Builder(ret_bb->getTerminator());
+      Value *Condition =
+          Builder.getInt1(true); // Replace with actual condition check
+      Builder.CreateCondBr(Condition, new_ret_bb, error_bb);
+
+      // Remove the old unconditional branch from the original split
+      ret_bb->getTerminator()->eraseFromParent();
+    }
   }
 
   return opaque_calls.size();
