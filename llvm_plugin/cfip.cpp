@@ -3,6 +3,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/DCE.h"
@@ -164,8 +165,19 @@ size_t harden_fn(Function &function) {
     auto fault_detected =
         Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
 
-    // Insert condition to return or trap
-    Builder.CreateCondBr(fault_detected, error_bb, new_ret_bb);
+    MDBuilder MDBuilder(Ctx);
+    Metadata *branch_weights[] = {
+        MDBuilder.createString("branch_weights"),
+        MDBuilder.createString("expected"),
+        ValueAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(Ctx), 1)), // cold(error) path
+        ValueAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(Ctx), 2000)), // hot(success) path
+    };
+    MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
+
+    // Attach metadata to the branch instruction
+    Builder.CreateCondBr(fault_detected, error_bb, new_ret_bb, ProfMD);
 
     // Remove the old unconditional branch from the original split
     ret_bb->getTerminator()->eraseFromParent();
