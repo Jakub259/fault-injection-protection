@@ -1,5 +1,6 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -166,10 +167,15 @@ size_t harden_fn(Function &function) {
 
 struct Cfip : PassInfoMixin<Cfip> {
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
-    if (harden_fn(F))
+    if (harden_fn(F)) {
+      // otherwise our hardening will be optimized out
+      F.addFnAttr(Attribute::OptimizeNone);
+      // required be OptimizeNone
+      F.addFnAttr(Attribute::NoInline);
       return PreservedAnalyses::none();
-    else
+    } else {
       return PreservedAnalyses::all();
+    }
   }
 
   static bool isRequired() { return true; }
