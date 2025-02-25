@@ -19,23 +19,29 @@ void getUsersRec(Value *const U, SetVector<Value *> &OutSV) {
   }
 }
 
-void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *instruction) {
+void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
   // before: x = a + b
   // after:
   //    tmp1 = a + b
   //    tmp2 = a + b
   //    local_fault_detected = tmp1 != tmp2
   //    fault_detected |= local_fault_detected
-  if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(instruction)) {
+  auto *instruction = dyn_cast<Instruction>(value);
+  if (!instruction) {
+    return;
+  }
+
+  if (isa<BinaryOperator>(instruction) or isa<UnaryOperator>(instruction) or
+      isa<SelectInst>(instruction) or isa<CmpInst>(instruction)) {
     errs() << "Adding redundancy to: " << *instruction << "\n";
 
-    IRBuilder<> Builder(binOp);
+    IRBuilder<> Builder(instruction);
 
-    auto *tmp1 = binOp->clone();
+    auto *tmp1 = instruction->clone();
     tmp1->setName("tmp1");
     Builder.Insert(tmp1);
 
-    auto *tmp2 = binOp->clone();
+    auto *tmp2 = instruction->clone();
     tmp2->setName("tmp2");
     Builder.Insert(tmp2);
 
@@ -52,9 +58,9 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *instruction) {
 
     Builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
 
-    // Replace original instruction with tmp1
-    binOp->replaceAllUsesWith(tmp1);
-    binOp->eraseFromParent();
+    // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
+    instruction->replaceAllUsesWith(tmp1);
+    instruction->eraseFromParent();
   }
 }
 
