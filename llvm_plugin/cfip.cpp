@@ -7,6 +7,7 @@
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/Reg2Mem.h"
 #include "llvm/Transforms/Scalar/SROA.h"
+#include "llvm/Transforms/Scalar/DCE.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -166,8 +167,13 @@ size_t harden_fn(Function &function) {
 }
 
 struct Cfip : PassInfoMixin<Cfip> {
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
     if (harden_fn(F)) {
+      // cleanup
+      SROAPass(SROAOptions::ModifyCFG).run(F, AM);
+      DCEPass().run(F, AM);
+
+      // turn off optmizer
       // otherwise our hardening will be optimized out
       F.addFnAttr(Attribute::OptimizeNone);
       // required be OptimizeNone
@@ -191,9 +197,7 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
                     // consider removing this later
-                    FPM.addPass(RegToMemPass());
                     FPM.addPass(Cfip());
-                    FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
                     return true;
                   }
                   return false;
