@@ -5,9 +5,9 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/Reg2Mem.h"
 #include "llvm/Transforms/Scalar/SROA.h"
-#include "llvm/Transforms/Scalar/DCE.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -66,12 +66,8 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
   }
 }
 
-size_t harden_fn(Function &function) {
-  LLVMContext &Ctx = function.getContext();
-
-  // In 99.9% cases there should be no more than one
+SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
   SmallVector<llvm::Instruction *, 1> opaque_calls;
-
   // find values to harden
   for (auto &basic_block : function)
     for (auto &instruction : basic_block) {
@@ -82,6 +78,15 @@ size_t harden_fn(Function &function) {
         }
       }
     }
+  return opaque_calls;
+}
+
+size_t harden_fn(Function &function) {
+  LLVMContext &Ctx = function.getContext();
+
+  // In 99.9% cases there should be no more than one
+  SmallVector<llvm::Instruction *, 1> opaque_calls =
+      find_values_to_harden(function);
 
   // if there are no values to there is nothing to do
   if (opaque_calls.empty())
@@ -98,7 +103,7 @@ size_t harden_fn(Function &function) {
   llvm::Instruction *fault_detected_ptr =
       builder_on_first_inst.CreateAlloca(i1_type, nullptr, "fault_detected");
   builder_on_first_inst.CreateStore(llvm::ConstantInt::get(i1_type, false),
-                      fault_detected_ptr);
+                                    fault_detected_ptr);
 
   for (auto &opaque_call : opaque_calls) {
     if (opaque_call->use_empty()) {
@@ -111,12 +116,14 @@ size_t harden_fn(Function &function) {
     // before: critical_var = opaque_call(start_value)
     // after: critical_var = start_value
     llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
-    
-    // NOTE: "placing alloca instructions at the beginning of the entry block should be preferred."
-    auto *opaque_value_ptr = 
-        builder_on_first_inst.CreateAlloca(opaque_call->getType(), nullptr, "result");
+
+    // NOTE: "placing alloca instructions at the beginning of the entry block
+    // should be preferred."
+    auto *opaque_value_ptr = builder_on_first_inst.CreateAlloca(
+        opaque_call->getType(), nullptr, "result");
     [[maybe_unused]] auto store_critical_value =
-        value_unwrapper_builder.CreateStore(opaque_call->getOperand(0), opaque_value_ptr);
+        value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
+                                            opaque_value_ptr);
 
     llvm::LoadInst *critical_value_use = value_unwrapper_builder.CreateLoad(
         opaque_call->getType(), opaque_value_ptr, false, "replacement");
