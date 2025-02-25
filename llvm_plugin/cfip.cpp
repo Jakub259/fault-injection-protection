@@ -90,14 +90,14 @@ size_t harden_fn(Function &function) {
   // it's safe to deref because now we know that there is *at least* one
   // instruction i.e. our opaque call
   llvm::Instruction *first_instruction = &*inst_begin(function);
-  llvm::IRBuilder<> builder(first_instruction);
+  llvm::IRBuilder<> builder_on_first_inst(first_instruction);
 
   llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
 
   // create value to store state of program
   llvm::Instruction *fault_detected_ptr =
-      builder.CreateAlloca(i1_type, nullptr, "fault_detected");
-  builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+      builder_on_first_inst.CreateAlloca(i1_type, nullptr, "fault_detected");
+  builder_on_first_inst.CreateStore(llvm::ConstantInt::get(i1_type, false),
                       fault_detected_ptr);
 
   for (auto &opaque_call : opaque_calls) {
@@ -110,14 +110,15 @@ size_t harden_fn(Function &function) {
     // it's no longer needed thus we unwrap them:
     // before: critical_var = opaque_call(start_value)
     // after: critical_var = start_value
-    llvm::IRBuilder<> builder(opaque_call);
-    // create space for the value
-    auto *opaque_value_ptr =
-        builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
+    llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
+    
+    // NOTE: "placing alloca instructions at the beginning of the entry block should be preferred."
+    auto *opaque_value_ptr = 
+        builder_on_first_inst.CreateAlloca(opaque_call->getType(), nullptr, "result");
     [[maybe_unused]] auto store_critical_value =
-        builder.CreateStore(opaque_call->getOperand(0), opaque_value_ptr);
+        value_unwrapper_builder.CreateStore(opaque_call->getOperand(0), opaque_value_ptr);
 
-    llvm::LoadInst *critical_value_use = builder.CreateLoad(
+    llvm::LoadInst *critical_value_use = value_unwrapper_builder.CreateLoad(
         opaque_call->getType(), opaque_value_ptr, false, "replacement");
 
     opaque_call->replaceAllUsesWith(critical_value_use);
@@ -173,7 +174,6 @@ struct Cfip : PassInfoMixin<Cfip> {
       SROAPass(SROAOptions::ModifyCFG).run(F, AM);
       DCEPass().run(F, AM);
 
-      // turn off optmizer
       // otherwise our hardening will be optimized out
       F.addFnAttr(Attribute::OptimizeNone);
       // required be OptimizeNone
