@@ -74,21 +74,24 @@ size_t harden_fn(Function &function) {
       }
     }
 
+  // if there are no values to there is nothing to do
+  if (opaque_calls.empty())
+    return 0;
+
+  // it's safe to deref because now we know that there is *at least* one
+  // instruction i.e. our opaque call
+  llvm::Instruction *first_instruction = &*inst_begin(function);
+  /* auto *allocaInst = new llvm::AllocaInst(Type::getInt1Ty); */
+  llvm::IRBuilder<> builder(
+      first_instruction); // Create IRBuilder at first instruction
+
+  llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
+
   // create value to store state of program
-  llvm::Instruction *fault_detected_ptr;
-  if (!opaque_calls.empty()) {
-    llvm::Instruction *first_instruction = &*inst_begin(function);
-    /* auto *allocaInst = new llvm::AllocaInst(Type::getInt1Ty); */
-    llvm::IRBuilder<> builder(
-        first_instruction); // Create IRBuilder at first instruction
-
-    llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
-
-    fault_detected_ptr =
-        builder.CreateAlloca(i1_type, nullptr, "fault_detected");
-    builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
-                        fault_detected_ptr);
-  }
+  llvm::Instruction *fault_detected_ptr =
+      builder.CreateAlloca(i1_type, nullptr, "fault_detected");
+  builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+                      fault_detected_ptr);
 
   for (auto &opaque_call : opaque_calls) {
     // rustc attribute hides value behind a call to prevent over-optimizations
@@ -120,35 +123,33 @@ size_t harden_fn(Function &function) {
     }
   }
 
-  if (!opaque_calls.empty()) {
-    // add a error handling basic block
-    BasicBlock *error_bb = BasicBlock::Create(Ctx, "error_handling", &function);
-    {
-      IRBuilder<> builder(error_bb);
-      builder.CreateCall(
-          Intrinsic::getDeclaration(function.getParent(), Intrinsic::trap));
-      builder.CreateUnreachable();
-    }
+  // add a error handling basic block
+  BasicBlock *error_bb = BasicBlock::Create(Ctx, "error_handling", &function);
+  {
+    IRBuilder<> builder(error_bb);
+    builder.CreateCall(
+        Intrinsic::getDeclaration(function.getParent(), Intrinsic::trap));
+    builder.CreateUnreachable();
+  }
 
-    // to finalize the protection by adding a check before any return
-    SmallVector<llvm::Instruction *, 1> return_instructions;
-    for (auto &basic_block : function) {
-      if (auto *ret_inst = dyn_cast<ReturnInst>(basic_block.getTerminator()))
-        return_instructions.push_back(ret_inst);
-    }
-    for (auto ret_inst : return_instructions) {
-      BasicBlock *ret_bb = ret_inst->getParent();
-      BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
+  // to finalize the protection by adding a check before any return
+  SmallVector<llvm::Instruction *, 1> return_instructions;
+  for (auto &basic_block : function) {
+    if (auto *ret_inst = dyn_cast<ReturnInst>(basic_block.getTerminator()))
+      return_instructions.push_back(ret_inst);
+  }
+  for (auto ret_inst : return_instructions) {
+    BasicBlock *ret_bb = ret_inst->getParent();
+    BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
 
-      // Insert condition before jumping to return or trap
-      IRBuilder<> Builder(ret_bb->getTerminator());
-      Value *Condition =
-          Builder.getInt1(true); // Replace with actual condition check
-      Builder.CreateCondBr(Condition, new_ret_bb, error_bb);
+    // Insert condition before jumping to return or trap
+    IRBuilder<> Builder(ret_bb->getTerminator());
+    Value *Condition =
+        Builder.getInt1(true); // Replace with actual condition check
+    Builder.CreateCondBr(Condition, new_ret_bb, error_bb);
 
-      // Remove the old unconditional branch from the original split
-      ret_bb->getTerminator()->eraseFromParent();
-    }
+    // Remove the old unconditional branch from the original split
+    ret_bb->getTerminator()->eraseFromParent();
   }
 
   return opaque_calls.size();
