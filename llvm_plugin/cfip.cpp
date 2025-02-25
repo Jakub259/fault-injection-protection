@@ -5,6 +5,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/Reg2Mem.h"
+#include "llvm/Transforms/Scalar/SROA.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -180,6 +181,7 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                     // consider removing this later
                     FPM.addPass(RegToMemPass());
                     FPM.addPass(Cfip());
+                    FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
                     return true;
                   }
                   return false;
