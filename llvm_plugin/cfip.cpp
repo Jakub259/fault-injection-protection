@@ -58,7 +58,7 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *instruction) {
 }
 
 size_t harden_fn(Function &function) {
-  [[maybe_unused]] LLVMContext &Ctx = function.getContext();
+  LLVMContext &Ctx = function.getContext();
 
   // In 99.9% cases there should be no more than one
   SmallVector<llvm::Instruction *, 1> opaque_calls;
@@ -81,9 +81,7 @@ size_t harden_fn(Function &function) {
   // it's safe to deref because now we know that there is *at least* one
   // instruction i.e. our opaque call
   llvm::Instruction *first_instruction = &*inst_begin(function);
-  /* auto *allocaInst = new llvm::AllocaInst(Type::getInt1Ty); */
-  llvm::IRBuilder<> builder(
-      first_instruction); // Create IRBuilder at first instruction
+  llvm::IRBuilder<> builder(first_instruction);
 
   llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
 
@@ -94,6 +92,11 @@ size_t harden_fn(Function &function) {
                       fault_detected_ptr);
 
   for (auto &opaque_call : opaque_calls) {
+    if (opaque_call->use_empty()) {
+      errs() << "WARNING: nothing to harden, value not used \n";
+      continue;
+    }
+
     // rustc attribute hides value behind a call to prevent over-optimizations
     // it's no longer needed thus we unwrap them:
     // before: critical_var = opaque_call(start_value)
@@ -108,10 +111,8 @@ size_t harden_fn(Function &function) {
     llvm::LoadInst *critical_value_use = builder.CreateLoad(
         opaque_call->getType(), opaque_value_ptr, false, "replacement");
 
-    if (!opaque_call->use_empty()) {
-      opaque_call->replaceAllUsesWith(critical_value_use);
-      opaque_call->eraseFromParent();
-    }
+    opaque_call->replaceAllUsesWith(critical_value_use);
+    opaque_call->eraseFromParent();
 
     // now that the value is extracted we find all it's users
     // but all users of my users are also my users (recursively)
@@ -142,11 +143,12 @@ size_t harden_fn(Function &function) {
     BasicBlock *ret_bb = ret_inst->getParent();
     BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
 
-    // Insert condition before jumping to return or trap
     IRBuilder<> Builder(ret_bb->getTerminator());
-    Value *Condition =
-        Builder.getInt1(true); // Replace with actual condition check
-    Builder.CreateCondBr(Condition, new_ret_bb, error_bb);
+    auto fault_detected =
+        Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
+
+    // Insert condition to return or trap
+    Builder.CreateCondBr(fault_detected, error_bb, new_ret_bb);
 
     // Remove the old unconditional branch from the original split
     ret_bb->getTerminator()->eraseFromParent();
