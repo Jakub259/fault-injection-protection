@@ -9,6 +9,7 @@
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/Reg2Mem.h"
 #include "llvm/Transforms/Scalar/SROA.h"
+#include "llvm/Transforms/Utils/Mem2Reg.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -82,6 +83,49 @@ SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
   return opaque_calls;
 }
 
+void add_integrity_check(Function &function, Instruction *fault_detected_ptr) {
+  auto &Ctx = function.getContext();
+
+  // add a error handling basic block
+  BasicBlock *error_bb = BasicBlock::Create(Ctx, "error_handling", &function);
+  {
+    IRBuilder<> builder(error_bb);
+    builder.CreateCall(
+        Intrinsic::getDeclaration(function.getParent(), Intrinsic::trap));
+    builder.CreateUnreachable();
+  }
+
+  SmallVector<llvm::Instruction *, 1> return_instructions;
+  for (auto &basic_block : function) {
+    if (auto *ret_inst = dyn_cast<ReturnInst>(basic_block.getTerminator()))
+      return_instructions.push_back(ret_inst);
+  }
+  // inserting checks before return instructions
+  for (auto ret_inst : return_instructions) {
+    BasicBlock *ret_bb = ret_inst->getParent();
+    BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
+
+    IRBuilder<> Builder(ret_bb->getTerminator());
+    auto fault_detected =
+        Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
+
+    MDBuilder MDBuilder(Ctx);
+    Metadata *branch_weights[] = {
+        MDBuilder.createString("branch_weights"),
+        MDBuilder.createString("expected"),
+        ValueAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(Ctx), 1)), // cold(error) path
+        ValueAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(Ctx), 2000)), // hot(success) path
+    };
+    MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
+
+    // replace terminator with conditional branch
+    Builder.CreateCondBr(fault_detected, error_bb, new_ret_bb, ProfMD);
+    ret_bb->getTerminator()->eraseFromParent();
+  }
+}
+
 size_t harden_fn(Function &function) {
   LLVMContext &Ctx = function.getContext();
 
@@ -143,46 +187,9 @@ size_t harden_fn(Function &function) {
     add_redundancy(fault_detected_ptr, user);
   }
 
-  // add a error handling basic block
-  BasicBlock *error_bb = BasicBlock::Create(Ctx, "error_handling", &function);
-  {
-    IRBuilder<> builder(error_bb);
-    builder.CreateCall(
-        Intrinsic::getDeclaration(function.getParent(), Intrinsic::trap));
-    builder.CreateUnreachable();
-  }
-
-  // to finalize the protection by adding a check before any return
-  SmallVector<llvm::Instruction *, 1> return_instructions;
-  for (auto &basic_block : function) {
-    if (auto *ret_inst = dyn_cast<ReturnInst>(basic_block.getTerminator()))
-      return_instructions.push_back(ret_inst);
-  }
-  for (auto ret_inst : return_instructions) {
-    BasicBlock *ret_bb = ret_inst->getParent();
-    BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
-
-    IRBuilder<> Builder(ret_bb->getTerminator());
-    auto fault_detected =
-        Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
-
-    MDBuilder MDBuilder(Ctx);
-    Metadata *branch_weights[] = {
-        MDBuilder.createString("branch_weights"),
-        MDBuilder.createString("expected"),
-        ValueAsMetadata::get(
-            ConstantInt::get(Type::getInt32Ty(Ctx), 1)), // cold(error) path
-        ValueAsMetadata::get(
-            ConstantInt::get(Type::getInt32Ty(Ctx), 2000)), // hot(success) path
-    };
-    MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
-
-    // Attach metadata to the branch instruction
-    Builder.CreateCondBr(fault_detected, error_bb, new_ret_bb, ProfMD);
-
-    // Remove the old unconditional branch from the original split
-    ret_bb->getTerminator()->eraseFromParent();
-  }
+  // call function to finalize the protection by adding a check before any
+  // return
+  add_integrity_check(function, fault_detected_ptr);
 
   return opaque_calls.size();
 }
@@ -216,7 +223,6 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                 [](StringRef Name, FunctionPassManager &FPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
-                    // consider removing this later
                     FPM.addPass(Cfip());
                     return true;
                   }
