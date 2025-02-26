@@ -7,9 +7,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/DCE.h"
-#include "llvm/Transforms/Scalar/Reg2Mem.h"
 #include "llvm/Transforms/Scalar/SROA.h"
-#include "llvm/Transforms/Utils/Mem2Reg.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -39,28 +37,33 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
       isa<SelectInst>(instruction) or isa<CmpInst>(instruction)) {
     errs() << "Adding redundancy to: " << *instruction << "\n";
 
-    IRBuilder<> Builder(instruction);
+    IRBuilder<> builder(instruction);
 
     auto *tmp1 = instruction->clone();
     tmp1->setName("tmp1");
-    Builder.Insert(tmp1);
+    builder.Insert(tmp1);
 
     auto *tmp2 = instruction->clone();
     tmp2->setName("tmp2");
-    Builder.Insert(tmp2);
+    builder.Insert(tmp2);
 
     // tmp1 != tmp2
     Value *local_fault_detected =
-        Builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
+        builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
 
     // fault_detected |= local_fault_detected
     auto fault_detected =
-        Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
+        builder.CreateLoad(builder.getInt1Ty(), fault_detected_ptr, false);
+
+    // if it's vector we need to reduce it to scalar
+    if (local_fault_detected->getType()->isVectorTy()) {
+      local_fault_detected = builder.CreateOrReduce(local_fault_detected);
+    }
 
     Value *updated_fault_detection_state =
-        Builder.CreateOr(fault_detected, local_fault_detected);
+        builder.CreateOr(fault_detected, local_fault_detected);
 
-    Builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
+    builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
 
     // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
     instruction->replaceAllUsesWith(tmp1);
@@ -153,7 +156,7 @@ size_t harden_fn(Function &function) {
   DenseSet<Value *> users_of_critical_values;
   for (auto &opaque_call : opaque_calls) {
     if (opaque_call->use_empty()) {
-      errs() << "WARNING: nothing to harden, value not used \n";
+      errs() << "WARNING: nothing to harden, value not used\n";
       continue;
     }
 
@@ -205,6 +208,8 @@ struct Cfip : PassInfoMixin<Cfip> {
       F.addFnAttr(Attribute::OptimizeNone);
       // required be OptimizeNone
       F.addFnAttr(Attribute::NoInline);
+      F.removeFnAttr(Attribute::OptimizeForSize);
+      F.removeFnAttr(Attribute::MinSize);
       return PreservedAnalyses::none();
     } else {
       return PreservedAnalyses::all();
