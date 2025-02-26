@@ -1,4 +1,4 @@
-#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/IRBuilder.h"
@@ -15,7 +15,7 @@ using namespace llvm;
 
 namespace {
 
-void getUsersRec(Value *const U, SetVector<Value *> &OutSV) {
+void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
   OutSV.insert(U);
   for (auto *user : U->users()) {
     getUsersRec(user, OutSV);
@@ -106,6 +106,7 @@ size_t harden_fn(Function &function) {
   builder_on_first_inst.CreateStore(llvm::ConstantInt::get(i1_type, false),
                                     fault_detected_ptr);
 
+  DenseSet<Value *> users_of_critical_values;
   for (auto &opaque_call : opaque_calls) {
     if (opaque_call->use_empty()) {
       errs() << "WARNING: nothing to harden, value not used \n";
@@ -134,12 +135,12 @@ size_t harden_fn(Function &function) {
 
     // now that the value is extracted we find all it's users
     // but all users of my users are also my users (recursively)
-    SetVector<Value *> ALLUsers{};
-    getUsersRec(critical_value_use, ALLUsers);
+    getUsersRec(critical_value_use, users_of_critical_values);
+  }
 
-    for (auto *user : ALLUsers) {
-      add_redundancy(fault_detected_ptr, user);
-    }
+  // add redundancy to all users of critical values
+  for (auto *user : users_of_critical_values) {
+    add_redundancy(fault_detected_ptr, user);
   }
 
   // add a error handling basic block
