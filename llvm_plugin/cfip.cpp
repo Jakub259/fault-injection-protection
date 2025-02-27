@@ -128,7 +128,7 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr) {
   }
 }
 llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
-                               IRBuilder<> &builder) {
+                               IRBuilder<> &alloca_builder) {
   // rustc attribute hides value behind a call to prevent over-optimizations
   // it's no longer needed thus we unwrap them:
   // before: critical_var = opaque_call(start_value)
@@ -136,7 +136,7 @@ llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
   llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
 
   auto *opaque_value_ptr =
-      builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
+      alloca_builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
   [[maybe_unused]] auto store_critical_value =
       value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
                                           opaque_value_ptr);
@@ -161,16 +161,16 @@ size_t harden_fn(Function &function) {
   llvm::Instruction *first_instruction = &*inst_begin(function);
   // note: the builder is used to create alloca
   // it should point to begin of entry block
-  llvm::IRBuilder<> builder(first_instruction);
+  llvm::IRBuilder<> alloca_builder(first_instruction);
 
   llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
 
   // create value to store state of program
   llvm::Instruction *fault_detected_ptr =
-      builder.CreateAlloca(i1_type, nullptr, "fault_detected");
-  builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+      alloca_builder.CreateAlloca(i1_type, nullptr, "fault_detected");
+  alloca_builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
                       fault_detected_ptr);
-  builder.SetInsertPoint(
+  alloca_builder.SetInsertPoint(
       first_instruction); // there are more allocas coming soon
 
   DenseSet<Value *> users_of_critical_values;
@@ -180,7 +180,7 @@ size_t harden_fn(Function &function) {
       continue;
     }
 
-    auto *critical_value_use = unwrap_call(opaque_call, builder);
+    auto *critical_value_use = unwrap_call(opaque_call, alloca_builder);
 
     // now that the value is extracted we find all it's users
     // but all users of my users are also my users (recursively)
