@@ -57,7 +57,7 @@ fn harden_init(stmt_init: &mut syn::LocalInit) {
                         #[inline(never)]
                         #[unsafe(no_mangle)]
                         fn #function_name<T>(dummy: T) -> T {
-                            use std::hint::black_box;
+                            use core::hint::black_box;
                             return black_box(dummy);
                         }
                         #function_name(#new_init)
