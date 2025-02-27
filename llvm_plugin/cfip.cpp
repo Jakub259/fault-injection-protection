@@ -73,7 +73,6 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
 
 SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
   SmallVector<llvm::Instruction *, 1> opaque_calls;
-  // find values to harden
   for (auto &basic_block : function)
     for (auto &instruction : basic_block) {
       if (auto *call = dyn_cast<CallInst>(&instruction)) {
@@ -128,7 +127,27 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr) {
     ret_bb->getTerminator()->eraseFromParent();
   }
 }
+llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
+                               IRBuilder<> &builder) {
+  // rustc attribute hides value behind a call to prevent over-optimizations
+  // it's no longer needed thus we unwrap them:
+  // before: critical_var = opaque_call(start_value)
+  // after: critical_var = start_value
+  llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
 
+  auto *opaque_value_ptr =
+      builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
+  [[maybe_unused]] auto store_critical_value =
+      value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
+                                          opaque_value_ptr);
+
+  llvm::LoadInst *critical_value_use = value_unwrapper_builder.CreateLoad(
+      opaque_call->getType(), opaque_value_ptr, false, "replacement");
+
+  opaque_call->replaceAllUsesWith(critical_value_use);
+  opaque_call->eraseFromParent();
+  return critical_value_use;
+}
 size_t harden_fn(Function &function) {
   LLVMContext &Ctx = function.getContext();
 
@@ -136,22 +155,23 @@ size_t harden_fn(Function &function) {
   SmallVector<llvm::Instruction *, 1> opaque_calls =
       find_values_to_harden(function);
 
-  // if there are no values to there is nothing to do
   if (opaque_calls.empty())
     return 0;
 
-  // it's safe to deref because now we know that there is *at least* one
-  // instruction i.e. our opaque call
   llvm::Instruction *first_instruction = &*inst_begin(function);
-  llvm::IRBuilder<> builder_on_first_inst(first_instruction);
+  // note: the builder is used to create alloca
+  // it should point to begin of entry block
+  llvm::IRBuilder<> builder(first_instruction);
 
   llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
 
   // create value to store state of program
   llvm::Instruction *fault_detected_ptr =
-      builder_on_first_inst.CreateAlloca(i1_type, nullptr, "fault_detected");
-  builder_on_first_inst.CreateStore(llvm::ConstantInt::get(i1_type, false),
-                                    fault_detected_ptr);
+      builder.CreateAlloca(i1_type, nullptr, "fault_detected");
+  builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+                      fault_detected_ptr);
+  builder.SetInsertPoint(
+      first_instruction); // there are more allocas coming soon
 
   DenseSet<Value *> users_of_critical_values;
   for (auto &opaque_call : opaque_calls) {
@@ -160,31 +180,12 @@ size_t harden_fn(Function &function) {
       continue;
     }
 
-    // rustc attribute hides value behind a call to prevent over-optimizations
-    // it's no longer needed thus we unwrap them:
-    // before: critical_var = opaque_call(start_value)
-    // after: critical_var = start_value
-    llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
-
-    // NOTE: "placing alloca instructions at the beginning of the entry block
-    // should be preferred."
-    auto *opaque_value_ptr = builder_on_first_inst.CreateAlloca(
-        opaque_call->getType(), nullptr, "result");
-    [[maybe_unused]] auto store_critical_value =
-        value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
-                                            opaque_value_ptr);
-
-    llvm::LoadInst *critical_value_use = value_unwrapper_builder.CreateLoad(
-        opaque_call->getType(), opaque_value_ptr, false, "replacement");
-
-    opaque_call->replaceAllUsesWith(critical_value_use);
-    opaque_call->eraseFromParent();
+    auto *critical_value_use = unwrap_call(opaque_call, builder);
 
     // now that the value is extracted we find all it's users
     // but all users of my users are also my users (recursively)
     getUsersRec(critical_value_use, users_of_critical_values);
   }
-
   // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user);
