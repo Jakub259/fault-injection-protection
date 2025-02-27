@@ -232,6 +232,48 @@ struct Cfip : PassInfoMixin<Cfip> {
   static bool isRequired() { return true; }
 };
 
+size_t harden_all(Function &function) {
+  LLVMContext &Ctx = function.getContext();
+  auto inst_cnt = function.getInstructionCount();
+  if (!inst_cnt)
+    return 0;
+
+  llvm::Instruction *first_instruction = &*inst_begin(function);
+  // note: the builder is used to create alloca
+  // it should point to begin of entry block
+  llvm::IRBuilder<> alloca_builder(first_instruction);
+
+  auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
+
+  // add redundancy to all
+  std::vector<llvm::Instruction *> instructions(inst_cnt);
+  for (inst_iterator inst = inst_begin(function), end = inst_end(function);
+       inst != end; ++inst) {
+    instructions.push_back(&*inst);
+  }
+  for (auto *i : instructions) {
+    if (i) {
+      add_redundancy(fault_detected_ptr, i);
+    }
+  }
+  add_integrity_check(function, fault_detected_ptr);
+
+  return 1;
+}
+
+struct ACfip : PassInfoMixin<ACfip> {
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+    if (harden_all(F)) {
+      finalize(F, AM);
+      return PreservedAnalyses::none();
+    } else {
+      return PreservedAnalyses::all();
+    }
+  }
+
+  static bool isRequired() { return true; }
+};
+
 } // namespace
 
 llvm::PassPluginLibraryInfo getCfipPluginInfo() {
@@ -242,6 +284,10 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
                     FPM.addPass(Cfip());
+                    return true;
+                  }
+                  if (Name == "acfip") {
+                    FPM.addPass(ACfip());
                     return true;
                   }
                   return false;
