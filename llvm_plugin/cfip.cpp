@@ -148,6 +148,20 @@ llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
   opaque_call->eraseFromParent();
   return critical_value_use;
 }
+
+llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
+
+  llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
+
+  // create value to store state of program
+  llvm::Instruction *fault_detected_ptr =
+      alloca_builder.CreateAlloca(i1_type, nullptr, "fault_detected");
+  alloca_builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+                             fault_detected_ptr);
+  alloca_builder.SetInsertPoint(fault_detected_ptr); // reset insert point
+  return fault_detected_ptr;
+}
+
 size_t harden_fn(Function &function) {
   LLVMContext &Ctx = function.getContext();
 
@@ -163,15 +177,7 @@ size_t harden_fn(Function &function) {
   // it should point to begin of entry block
   llvm::IRBuilder<> alloca_builder(first_instruction);
 
-  llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
-
-  // create value to store state of program
-  llvm::Instruction *fault_detected_ptr =
-      alloca_builder.CreateAlloca(i1_type, nullptr, "fault_detected");
-  alloca_builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
-                      fault_detected_ptr);
-  alloca_builder.SetInsertPoint(
-      first_instruction); // there are more allocas coming soon
+  auto fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
   DenseSet<Value *> users_of_critical_values;
   for (auto &opaque_call : opaque_calls) {
@@ -198,19 +204,67 @@ size_t harden_fn(Function &function) {
   return opaque_calls.size();
 }
 
+void finalize(Function &F, FunctionAnalysisManager &AM) {
+  // invalidate analyses before cleanup passes
+  AM.invalidate(F, PreservedAnalyses::none());
+  // cleanup
+  SROAPass(SROAOptions::ModifyCFG).run(F, AM);
+  DCEPass().run(F, AM);
+
+  // turn off optimizer otherwise our hardening will be optimized out
+  F.addFnAttr(Attribute::OptimizeNone);
+  // required be OptimizeNone
+  F.addFnAttr(Attribute::NoInline);
+  F.removeFnAttr(Attribute::OptimizeForSize);
+  F.removeFnAttr(Attribute::MinSize);
+}
+
 struct Cfip : PassInfoMixin<Cfip> {
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
     if (harden_fn(F)) {
-      // cleanup
-      SROAPass(SROAOptions::ModifyCFG).run(F, AM);
-      DCEPass().run(F, AM);
+      finalize(F, AM);
+      return PreservedAnalyses::none();
+    } else {
+      return PreservedAnalyses::all();
+    }
+  }
 
-      // otherwise our hardening will be optimized out
-      F.addFnAttr(Attribute::OptimizeNone);
-      // required be OptimizeNone
-      F.addFnAttr(Attribute::NoInline);
-      F.removeFnAttr(Attribute::OptimizeForSize);
-      F.removeFnAttr(Attribute::MinSize);
+  static bool isRequired() { return true; }
+};
+
+size_t harden_all(Function &function) {
+  LLVMContext &Ctx = function.getContext();
+  auto inst_cnt = function.getInstructionCount();
+  if (!inst_cnt)
+    return 0;
+
+  llvm::Instruction *first_instruction = &*inst_begin(function);
+  // note: the builder is used to create alloca
+  // it should point to begin of entry block
+  llvm::IRBuilder<> alloca_builder(first_instruction);
+
+  auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
+
+  // add redundancy to all
+  std::vector<llvm::Instruction *> instructions(inst_cnt);
+  for (inst_iterator inst = inst_begin(function), end = inst_end(function);
+       inst != end; ++inst) {
+    instructions.push_back(&*inst);
+  }
+  for (auto *i : instructions) {
+    if (i) {
+      add_redundancy(fault_detected_ptr, i);
+    }
+  }
+  add_integrity_check(function, fault_detected_ptr);
+
+  return 1;
+}
+
+struct ACfip : PassInfoMixin<ACfip> {
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+    if (harden_all(F)) {
+      finalize(F, AM);
       return PreservedAnalyses::none();
     } else {
       return PreservedAnalyses::all();
@@ -230,6 +284,10 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
                     FPM.addPass(Cfip());
+                    return true;
+                  }
+                  if (Name == "acfip") {
+                    FPM.addPass(ACfip());
                     return true;
                   }
                   return false;
