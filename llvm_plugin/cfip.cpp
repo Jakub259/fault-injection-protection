@@ -205,7 +205,7 @@ size_t harden_fn(Function &function) {
 }
 
 void finalize(Function &F, FunctionAnalysisManager &AM) {
-  // invalidate analyses before calling invoking cleanup passes
+  // invalidate analyses before cleanup passes
   AM.invalidate(F, PreservedAnalyses::none());
   // cleanup
   SROAPass(SROAOptions::ModifyCFG).run(F, AM);
