@@ -36,6 +36,15 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
 
   if (isa<BinaryOperator>(instruction) or isa<UnaryOperator>(instruction) or
       isa<SelectInst>(instruction) or isa<CmpInst>(instruction)) {
+
+    const auto *inst_Ty = instruction->getType();
+
+    bool is_supported_by_cmp =
+        inst_Ty->isIntOrIntVectorTy() || inst_Ty->isPtrOrPtrVectorTy();
+
+    if (not is_supported_by_cmp)
+      return;
+
     errs() << "Adding redundancy to: " << *instruction << "\n";
 
     IRBuilder<> builder(instruction);
@@ -57,7 +66,7 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
         builder.CreateLoad(builder.getInt1Ty(), fault_detected_ptr, false);
 
     // if it's vector we need to reduce it to scalar
-    if (local_fault_detected->getType()->isVectorTy()) {
+    if (inst_Ty->isVectorTy()) {
       local_fault_detected = builder.CreateOrReduce(local_fault_detected);
     }
 
