@@ -1,3 +1,4 @@
-/rust_attribute/target
+target/
 /build
 /tests/Output
+Cargo.lock
