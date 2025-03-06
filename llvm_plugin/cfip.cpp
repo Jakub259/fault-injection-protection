@@ -4,6 +4,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/MDBuilder.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Scalar/DCE.h"
@@ -162,7 +163,7 @@ llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
   return fault_detected_ptr;
 }
 
-size_t harden_fn(Function &function) {
+size_t harden_chosen(Function &function) {
   LLVMContext &Ctx = function.getContext();
 
   // In 99.9% cases there should be no more than one
@@ -217,12 +218,24 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
   F.addFnAttr(Attribute::NoInline);
   F.removeFnAttr(Attribute::OptimizeForSize);
   F.removeFnAttr(Attribute::MinSize);
+  F.removeFnAttr(Attribute::AlwaysInline);
 }
 
-struct Cfip : PassInfoMixin<Cfip> {
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
-    if (harden_fn(F)) {
-      finalize(F, AM);
+template <auto Fn>
+struct Cfip : PassInfoMixin<Cfip<Fn>> {
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
+    FunctionAnalysisManager *FAM =
+        &AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+    DenseSet<Function *> hardened_functions;
+
+    for (auto &F : M) {
+      if (Fn(F)) {
+        finalize(F, *FAM);
+        hardened_functions.insert(&F);
+      }
+    }
+
+    if (hardened_functions.empty()) {
       return PreservedAnalyses::none();
     } else {
       return PreservedAnalyses::all();
@@ -261,33 +274,20 @@ size_t harden_all(Function &function) {
   return 1;
 }
 
-struct ACfip : PassInfoMixin<ACfip> {
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
-    if (harden_all(F)) {
-      finalize(F, AM);
-      return PreservedAnalyses::none();
-    } else {
-      return PreservedAnalyses::all();
-    }
-  }
-
-  static bool isRequired() { return true; }
-};
-
 } // namespace
 
 llvm::PassPluginLibraryInfo getCfipPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
-                [](StringRef Name, FunctionPassManager &FPM,
+                [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "cfip") {
-                    FPM.addPass(Cfip());
+                    MPM.addPass(Cfip<harden_chosen>());
                     return true;
                   }
                   if (Name == "acfip") {
-                    FPM.addPass(ACfip());
+                    MPM.addPass(Cfip<harden_all>());
                     return true;
                   }
                   return false;

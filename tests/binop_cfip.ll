@@ -1,4 +1,4 @@
-; RUN: opt -passes='function(cfip)' -load-pass-plugin=../build/lib/LLVMCfip.so %s -S -o %t.ll
+; RUN: opt -passes='cfip' -load-pass-plugin=../build/lib/LLVMCfip.so %s -S -o %t.ll
 ; RUN: clang %t.ll -o %t.out
 ; RUN: %t.out
 ; RUN: cat %t.ll | FileCheck %s
