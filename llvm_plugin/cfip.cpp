@@ -22,7 +22,8 @@ void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
   }
 }
 
-void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value) {
+void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value,
+                    bool thread_safe) {
   // before: x = a + b
   // after:
   //    tmp1 = a + b
@@ -95,7 +96,8 @@ SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
   return opaque_calls;
 }
 
-void add_integrity_check(Function &function, Instruction *fault_detected_ptr) {
+void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
+                         bool thread_safe) {
   auto &Ctx = function.getContext();
 
   // add a error handling basic block
@@ -172,7 +174,7 @@ llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
   return fault_detected_ptr;
 }
 
-size_t harden_chosen(Function &function) {
+size_t harden_chosen(Function &function, bool thread_safe) {
   LLVMContext &Ctx = function.getContext();
 
   // In 99.9% cases there should be no more than one
@@ -204,12 +206,12 @@ size_t harden_chosen(Function &function) {
   }
   // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
-    add_redundancy(fault_detected_ptr, user);
+    add_redundancy(fault_detected_ptr, user, thread_safe);
   }
 
   // call function to finalize the protection by adding a check before any
   // return
-  add_integrity_check(function, fault_detected_ptr);
+  add_integrity_check(function, fault_detected_ptr, thread_safe);
 
   return opaque_calls.size();
 }
@@ -231,13 +233,16 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
 }
 
 template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
+  const bool thread_safe;
+  Cfip(bool thread_safe = false) : thread_safe(thread_safe) {}
+
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
     FunctionAnalysisManager *FAM =
         &AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     DenseSet<Function *> hardened_functions;
 
     for (auto &F : M) {
-      if (Fn(F)) {
+      if (Fn(F, thread_safe)) {
         finalize(F, *FAM);
         hardened_functions.insert(&F);
       }
@@ -253,7 +258,7 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   static bool isRequired() { return true; }
 };
 
-size_t harden_all(Function &function) {
+size_t harden_all(Function &function, bool thread_safe) {
   LLVMContext &Ctx = function.getContext();
   auto inst_cnt = function.getInstructionCount();
   if (!inst_cnt)
@@ -274,10 +279,10 @@ size_t harden_all(Function &function) {
   }
   for (auto *i : instructions) {
     if (i) {
-      add_redundancy(fault_detected_ptr, i);
+      add_redundancy(fault_detected_ptr, i, thread_safe);
     }
   }
-  add_integrity_check(function, fault_detected_ptr);
+  add_integrity_check(function, fault_detected_ptr, thread_safe);
 
   return 1;
 }
