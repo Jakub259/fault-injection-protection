@@ -230,8 +230,7 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
   F.removeFnAttr(Attribute::AlwaysInline);
 }
 
-template <auto Fn>
-struct Cfip : PassInfoMixin<Cfip<Fn>> {
+template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
     FunctionAnalysisManager *FAM =
         &AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
