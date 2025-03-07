@@ -41,7 +41,7 @@ MDNode *create_br_weights(LLVMContext &Ctx, uint64_t br_weight_l,
 }
 
 void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
-                    bool thread_safe, llvm::BasicBlock *error_bb) {
+                    bool atomic_state, llvm::BasicBlock *error_bb) {
   // before: x = a + b
   // after:
   //    tmp1 = a + b
@@ -100,7 +100,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
     Instruction *last;
     Instruction *state;
 
-    if (thread_safe) {
+    if (atomic_state) {
       local_fault_detected =
           builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
 
@@ -173,7 +173,7 @@ BasicBlock *insert_error_bb(Function &function) {
 }
 
 void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
-                         bool thread_safe, BasicBlock *error_bb) {
+                         bool atomic_state, BasicBlock *error_bb) {
   auto &Ctx = function.getContext();
 
   SmallVector<llvm::Instruction *, 1> return_instructions;
@@ -190,7 +190,7 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
 
     auto *fault_detected =
         Builder.CreateLoad(Builder.getInt8Ty(), fault_detected_ptr, false);
-    if (thread_safe) {
+    if (atomic_state) {
       fault_detected->setAtomic(AtomicOrdering::Acquire);
     }
 
@@ -238,7 +238,7 @@ llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
   return fault_detected_ptr;
 }
 
-size_t harden_chosen(Function &function, bool thread_safe, bool check_asap) {
+size_t harden_chosen(Function &function, bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
 
   // In 99.9% cases there should be no more than one
@@ -272,11 +272,11 @@ size_t harden_chosen(Function &function, bool thread_safe, bool check_asap) {
   auto *error_bb = insert_error_bb(function);
   // call function to finalize the protection by adding a check before any
   // return
-  add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
+  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
-    add_redundancy(fault_detected_ptr, user, thread_safe,
+    add_redundancy(fault_detected_ptr, user, atomic_state,
                    check_asap ? error_bb : nullptr);
   }
 
@@ -300,10 +300,10 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
 }
 
 template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
-  const bool thread_safe;
+  const bool atomic_state;
   const bool check_asap;
-  Cfip(bool thread_safe_ = false, bool check_asap_ = false)
-      : thread_safe(thread_safe_), check_asap{check_asap_} {}
+  Cfip(bool atomic_state_ = false, bool check_asap_ = false)
+      : atomic_state(atomic_state_), check_asap{check_asap_} {}
 
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
     FunctionAnalysisManager *FAM =
@@ -311,7 +311,7 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
     DenseSet<Function *> hardened_functions;
 
     for (auto &F : M) {
-      if (Fn(F, thread_safe, check_asap)) {
+      if (Fn(F, atomic_state, check_asap)) {
         finalize(F, *FAM);
         hardened_functions.insert(&F);
       }
@@ -327,7 +327,7 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   static bool isRequired() { return true; }
 };
 
-size_t harden_all(Function &function, bool thread_safe, bool check_asap) {
+size_t harden_all(Function &function, bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
   auto inst_cnt = function.getInstructionCount();
   if (!inst_cnt)
@@ -347,11 +347,11 @@ size_t harden_all(Function &function, bool thread_safe, bool check_asap) {
     instructions.push_back(&*inst);
   }
 
-  add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
+  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   for (auto *i : instructions) {
     if (i) {
-      add_redundancy(fault_detected_ptr, i, thread_safe,
+      add_redundancy(fault_detected_ptr, i, atomic_state,
                      check_asap ? error_bb : nullptr);
     }
   }
@@ -362,12 +362,12 @@ size_t harden_all(Function &function, bool thread_safe, bool check_asap) {
 } // namespace
 
 struct CfipOpts {
-  bool thread_safe;
+  bool atomic_state;
   bool harden_all;
   bool check_asap;
-  CfipOpts(bool thread_safe_ = false, bool harden_all_ = false,
+  CfipOpts(bool atomic_state_ = false, bool harden_all_ = false,
            bool check_asap_ = false)
-      : thread_safe(thread_safe_), harden_all(harden_all_),
+      : atomic_state(atomic_state_), harden_all(harden_all_),
         check_asap(check_asap_) {}
 };
 Expected<CfipOpts> parseCfipOpts(StringRef Params) {
@@ -377,8 +377,8 @@ Expected<CfipOpts> parseCfipOpts(StringRef Params) {
     std::tie(ParamName, Params) = Params.split(';');
 
     bool Enable = !ParamName.consume_front("no-");
-    if (ParamName == "thread-safe")
-      Result.thread_safe = Enable;
+    if (ParamName == "atomic-state")
+      Result.atomic_state = Enable;
     else if (ParamName == "harden-all")
       Result.harden_all = Enable;
     else if (ParamName == "check-asap")
@@ -404,14 +404,14 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                     }
 
                     if (Params->harden_all) {
-                      MPM.addPass(Cfip<harden_all>{Params->thread_safe,
+                      MPM.addPass(Cfip<harden_all>{Params->atomic_state,
                                                    Params->check_asap});
                     } else {
-                      MPM.addPass(Cfip<harden_chosen>{Params->thread_safe,
+                      MPM.addPass(Cfip<harden_chosen>{Params->atomic_state,
                                                       Params->check_asap});
                     }
                     errs() << "CFIP: " << Params->harden_all << " "
-                           << Params->thread_safe << "\n";
+                           << Params->atomic_state << "\n";
                     return true;
                   }
                   return false;
