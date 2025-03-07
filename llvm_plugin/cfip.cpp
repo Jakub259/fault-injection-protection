@@ -7,6 +7,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 
@@ -62,19 +63,30 @@ void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value,
     Value *local_fault_detected =
         builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
 
-    // fault_detected |= local_fault_detected
-    auto fault_detected =
-        builder.CreateLoad(builder.getInt1Ty(), fault_detected_ptr, false);
-
     // if it's vector we need to reduce it to scalar
     if (inst_Ty->isVectorTy()) {
       local_fault_detected = builder.CreateOrReduce(local_fault_detected);
     }
 
-    Value *updated_fault_detection_state =
-        builder.CreateOr(fault_detected, local_fault_detected);
+    if (thread_safe) {
+      local_fault_detected =
+          builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
+      builder.CreateAtomicRMW(AtomicRMWInst::BinOp::Or, fault_detected_ptr,
+                              local_fault_detected, MaybeAlign(1),
+                              AtomicOrdering::AcquireRelease);
+    } else {
+      // fault_detected |= local_fault_detected
+      auto fault_detected =
+          builder.CreateLoad(builder.getInt8Ty(), fault_detected_ptr, false);
 
-    builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
+      local_fault_detected =
+          builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
+
+      Value *updated_fault_detection_state =
+          builder.CreateOr(fault_detected, local_fault_detected);
+
+      builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
+    }
 
     // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
     instruction->replaceAllUsesWith(tmp1);
@@ -120,8 +132,6 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
     BasicBlock *new_ret_bb = ret_bb->splitBasicBlock(ret_inst, "ret_block");
 
     IRBuilder<> Builder(ret_bb->getTerminator());
-    auto fault_detected =
-        Builder.CreateLoad(Builder.getInt1Ty(), fault_detected_ptr, false);
 
     MDBuilder MDBuilder(Ctx);
     Metadata *branch_weights[] = {
@@ -134,8 +144,18 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
     };
     MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
 
-    // replace terminator with conditional branch
-    Builder.CreateCondBr(fault_detected, error_bb, new_ret_bb, ProfMD);
+    auto *fault_detected =
+        Builder.CreateLoad(Builder.getInt8Ty(), fault_detected_ptr, false);
+    if (thread_safe) {
+      fault_detected->setAtomic(AtomicOrdering::Acquire);
+    }
+
+    // nuw keyword is present, and any of the truncated bits are non-zero, the
+    // result is a poison value. we use i8 as boolean(i1) so it's safe to
+    // truncate with nuw
+    auto *fault_detected_cond =
+        Builder.CreateTrunc(fault_detected, Builder.getInt1Ty(), "", true);
+    Builder.CreateCondBr(fault_detected_cond, error_bb, new_ret_bb, ProfMD);
     ret_bb->getTerminator()->eraseFromParent();
   }
 }
@@ -163,13 +183,14 @@ llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
 
 llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
 
-  llvm::Type *i1_type = llvm::IntegerType::getInt1Ty(Ctx);
+  llvm::Type *i8_type = llvm::IntegerType::getInt8Ty(Ctx);
 
   // create value to store state of program
   llvm::Instruction *fault_detected_ptr =
-      alloca_builder.CreateAlloca(i1_type, nullptr, "fault_detected");
-  alloca_builder.CreateStore(llvm::ConstantInt::get(i1_type, false),
+      alloca_builder.CreateAlloca(i8_type, nullptr, "fault_detected");
+  alloca_builder.CreateStore(llvm::ConstantInt::get(i8_type, false),
                              fault_detected_ptr);
+
   alloca_builder.SetInsertPoint(fault_detected_ptr); // reset insert point
   return fault_detected_ptr;
 }
