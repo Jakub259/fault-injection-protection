@@ -39,9 +39,8 @@ MDNode *create_br_weights(LLVMContext &Ctx, uint64_t br_weight_l,
   return ProfMD;
 }
 
-
 void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
-                    bool thread_safe) {
+                    bool thread_safe, llvm::BasicBlock *error_bb) {
   // before: x = a + b
   // after:
   //    tmp1 = a + b
@@ -207,7 +206,7 @@ llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
   return fault_detected_ptr;
 }
 
-size_t harden_chosen(Function &function, bool thread_safe) {
+size_t harden_chosen(Function &function, bool thread_safe, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
 
   // In 99.9% cases there should be no more than one
@@ -239,15 +238,15 @@ size_t harden_chosen(Function &function, bool thread_safe) {
   }
 
   auto *error_bb = insert_error_bb(function);
-
-  // add redundancy to all users of critical values
-  for (auto *user : users_of_critical_values) {
-    add_redundancy(fault_detected_ptr, user, thread_safe);
-  }
-
   // call function to finalize the protection by adding a check before any
   // return
   add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
+
+  // add redundancy to all users of critical values
+  for (auto *user : users_of_critical_values) {
+    add_redundancy(fault_detected_ptr, user, thread_safe,
+                   check_asap ? error_bb : nullptr);
+  }
 
   return opaque_calls.size();
 }
@@ -270,7 +269,9 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
 
 template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   const bool thread_safe;
-  Cfip(bool thread_safe = false) : thread_safe(thread_safe) {}
+  const bool check_asap;
+  Cfip(bool thread_safe_ = false, bool check_asap_ = false)
+      : thread_safe(thread_safe_), check_asap{check_asap_} {}
 
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
     FunctionAnalysisManager *FAM =
@@ -278,7 +279,7 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
     DenseSet<Function *> hardened_functions;
 
     for (auto &F : M) {
-      if (Fn(F, thread_safe)) {
+      if (Fn(F, thread_safe, check_asap)) {
         finalize(F, *FAM);
         hardened_functions.insert(&F);
       }
@@ -294,7 +295,7 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   static bool isRequired() { return true; }
 };
 
-size_t harden_all(Function &function, bool thread_safe) {
+size_t harden_all(Function &function, bool thread_safe, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
   auto inst_cnt = function.getInstructionCount();
   if (!inst_cnt)
@@ -313,30 +314,72 @@ size_t harden_all(Function &function, bool thread_safe) {
        inst != end; ++inst) {
     instructions.push_back(&*inst);
   }
+
+  add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
+
   for (auto *i : instructions) {
     if (i) {
-      add_redundancy(fault_detected_ptr, i, thread_safe);
+      add_redundancy(fault_detected_ptr, i, thread_safe,
+                     check_asap ? error_bb : nullptr);
     }
   }
-  add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
 
   return 1;
 }
 
 } // namespace
 
+struct CfipOpts {
+  bool thread_safe;
+  bool harden_all;
+  bool check_asap;
+  CfipOpts(bool thread_safe_ = false, bool harden_all_ = false,
+           bool check_asap_ = false)
+      : thread_safe(thread_safe_), harden_all(harden_all_),
+        check_asap(check_asap_) {}
+};
+Expected<CfipOpts> parseCfipOpts(StringRef Params) {
+  CfipOpts Result{};
+  while (!Params.empty()) {
+    StringRef ParamName;
+    std::tie(ParamName, Params) = Params.split(';');
+
+    bool Enable = !ParamName.consume_front("no-");
+    if (ParamName == "thread-safe")
+      Result.thread_safe = Enable;
+    else if (ParamName == "harden-all")
+      Result.harden_all = Enable;
+    else if (ParamName == "check-asap")
+      Result.check_asap = Enable;
+    else
+      return make_error<StringError>("Unknown parameter: " + ParamName,
+                                     inconvertibleErrorCode());
+  }
+  return Result;
+}
 llvm::PassPluginLibraryInfo getCfipPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
-                  if (Name == "cfip") {
-                    MPM.addPass(Cfip<harden_chosen>());
-                    return true;
-                  }
-                  if (Name == "acfip") {
-                    MPM.addPass(Cfip<harden_all>());
+                  if (PassBuilder::checkParametrizedPassName(Name, "cfip")) {
+                    auto Params = PassBuilder::parsePassParameters(
+                        parseCfipOpts, Name, "cfip");
+                    if (!Params) {
+                      errs() << Params.takeError();
+                      exit(EXIT_FAILURE);
+                    }
+
+                    if (Params->harden_all) {
+                      MPM.addPass(Cfip<harden_all>{Params->thread_safe,
+                                                   Params->check_asap});
+                    } else {
+                      MPM.addPass(Cfip<harden_chosen>{Params->thread_safe,
+                                                      Params->check_asap});
+                    }
+                    errs() << "CFIP: " << Params->harden_all << " "
+                           << Params->thread_safe << "\n";
                     return true;
                   }
                   return false;

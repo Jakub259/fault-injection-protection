@@ -17,7 +17,8 @@ define dso_local i32 @main() local_unnamed_addr {
   ; CHECK-COUNT-2: add i32 1, 42 
   %sum = add i32 1, %val
   ; CHECK: icmp ne i32 %1, %2
-  ; CHECK: or i1 false, %is_fault_detected
+  ; CHECK: %3 = zext i1 %is_fault_detected
+  ; CHECK: or i8 0, %3
 
   ; CHECK-COUNT-4: insertelement 
   %vec0 = insertelement <4 x i32> undef, i32 %sum, i32 0
@@ -30,14 +31,14 @@ define dso_local i32 @main() local_unnamed_addr {
   %vec_sum = add <4 x i32> <i32 12, i32 23, i32 34, i32 -28> , %vec
   ; Vector additionally has to be reduced
   ; CHECK: call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> %is_fault_detected
-  ; CHECK: or i1
+  ; CHECK: or i8
 
   ; CHECK: %reduced = call i32 @llvm.vector.reduce.add.v4i32 
   %reduced = call i32 @llvm.vector.reduce.add.v4i32(<4 x i32> %vec_sum)
   ; CHECK-COUNT-2: add i32 %reduced, %1
   %total = add i32 %reduced, %sum
   ; CHECK: icmp ne i32
-  ; CHECK: or i1
+  ; CHECK: or i8
 
   ; check if fault was detected
   ; CHECK: br i1 
