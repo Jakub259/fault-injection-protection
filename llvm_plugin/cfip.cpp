@@ -84,13 +84,20 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
       local_fault_detected = builder.CreateOrReduce(local_fault_detected);
     }
 
+    Instruction *last;
+    Instruction *state;
+
     if (thread_safe) {
       local_fault_detected =
           builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
-      builder.CreateAtomicRMW(AtomicRMWInst::BinOp::Or, fault_detected_ptr,
-                              local_fault_detected, MaybeAlign(1),
-                              AtomicOrdering::AcquireRelease);
+
+      state = last = cast<Instruction>(builder.CreateAtomicRMW(
+          AtomicRMWInst::BinOp::Or, fault_detected_ptr, local_fault_detected,
+          MaybeAlign(1), AtomicOrdering::AcquireRelease));
     } else {
+      local_fault_detected =
+          builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
+
       // fault_detected |= local_fault_detected
       auto fault_detected =
           builder.CreateLoad(builder.getInt8Ty(), fault_detected_ptr, false);
@@ -98,15 +105,30 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
       local_fault_detected =
           builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
 
-      Value *updated_fault_detection_state =
-          builder.CreateOr(fault_detected, local_fault_detected);
+      state = cast<Instruction>(
+          builder.CreateOr(fault_detected, local_fault_detected));
 
-      builder.CreateStore(updated_fault_detection_state, fault_detected_ptr);
+      last = builder.CreateStore(state, fault_detected_ptr);
     }
 
     // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
     instruction->replaceAllUsesWith(tmp1);
     instruction->eraseFromParent();
+
+    if (error_bb) {
+      BasicBlock *before = state->getParent();
+      BasicBlock *after = before->splitBasicBlock(last->getNextNode(), "after");
+
+
+      auto old_terminator = before->getTerminator();
+      IRBuilder<> Builder(old_terminator);
+
+      auto *fault_detected_cond =
+          Builder.CreateTrunc(state, builder.getInt1Ty(), "", true);
+
+      Builder.CreateCondBr(fault_detected_cond, error_bb, after);
+      old_terminator->eraseFromParent();
+    }
   }
 }
 
