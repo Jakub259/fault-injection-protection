@@ -3,6 +3,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -23,7 +24,23 @@ void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
   }
 }
 
-void add_redundancy(llvm::Value *fault_detected_ptr, llvm::Value *value,
+MDNode *create_br_weights(LLVMContext &Ctx, uint64_t br_weight_l,
+                          uint64_t br_weight_r) {
+  MDBuilder MDBuilder(Ctx);
+  Metadata *branch_weights[] = {
+      MDBuilder.createString("branch_weights"),
+      MDBuilder.createString("expected"),
+      ValueAsMetadata::get(
+          ConstantInt::get(Type::getInt32Ty(Ctx), br_weight_l)),
+      ValueAsMetadata::get(
+          ConstantInt::get(Type::getInt32Ty(Ctx), br_weight_r)),
+  };
+  MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
+  return ProfMD;
+}
+
+
+void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
                     bool thread_safe) {
   // before: x = a + b
   // after:
@@ -108,10 +125,8 @@ SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
   return opaque_calls;
 }
 
-void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
-                         bool thread_safe) {
+BasicBlock *insert_error_bb(Function &function) {
   auto &Ctx = function.getContext();
-
   // add a error handling basic block
   BasicBlock *error_bb = BasicBlock::Create(Ctx, "error_handling", &function);
   {
@@ -120,6 +135,12 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
         Intrinsic::getDeclaration(function.getParent(), Intrinsic::trap));
     builder.CreateUnreachable();
   }
+  return error_bb;
+}
+
+void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
+                         bool thread_safe, BasicBlock *error_bb) {
+  auto &Ctx = function.getContext();
 
   SmallVector<llvm::Instruction *, 1> return_instructions;
   for (auto &basic_block : function) {
@@ -133,17 +154,6 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
 
     IRBuilder<> Builder(ret_bb->getTerminator());
 
-    MDBuilder MDBuilder(Ctx);
-    Metadata *branch_weights[] = {
-        MDBuilder.createString("branch_weights"),
-        MDBuilder.createString("expected"),
-        ValueAsMetadata::get(
-            ConstantInt::get(Type::getInt32Ty(Ctx), 1)), // cold(error) path
-        ValueAsMetadata::get(
-            ConstantInt::get(Type::getInt32Ty(Ctx), 2000)), // hot(success) path
-    };
-    MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
-
     auto *fault_detected =
         Builder.CreateLoad(Builder.getInt8Ty(), fault_detected_ptr, false);
     if (thread_safe) {
@@ -155,6 +165,8 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
     // truncate with nuw
     auto *fault_detected_cond =
         Builder.CreateTrunc(fault_detected, Builder.getInt1Ty(), "", true);
+
+    auto *ProfMD = create_br_weights(Ctx, 1, 2000);
     Builder.CreateCondBr(fault_detected_cond, error_bb, new_ret_bb, ProfMD);
     ret_bb->getTerminator()->eraseFromParent();
   }
@@ -167,8 +179,8 @@ llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
   // after: critical_var = start_value
   llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
 
-  auto *opaque_value_ptr =
-      alloca_builder.CreateAlloca(opaque_call->getType(), nullptr, "result");
+  auto *opaque_value_ptr = alloca_builder.CreateAlloca(
+      opaque_call->getType(), nullptr, "unwrapped_value");
   [[maybe_unused]] auto store_critical_value =
       value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
                                           opaque_value_ptr);
@@ -225,6 +237,9 @@ size_t harden_chosen(Function &function, bool thread_safe) {
     // but all users of my users are also my users (recursively)
     getUsersRec(critical_value_use, users_of_critical_values);
   }
+
+  auto *error_bb = insert_error_bb(function);
+
   // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user, thread_safe);
@@ -232,7 +247,7 @@ size_t harden_chosen(Function &function, bool thread_safe) {
 
   // call function to finalize the protection by adding a check before any
   // return
-  add_integrity_check(function, fault_detected_ptr, thread_safe);
+  add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
 
   return opaque_calls.size();
 }
@@ -291,7 +306,7 @@ size_t harden_all(Function &function, bool thread_safe) {
   llvm::IRBuilder<> alloca_builder(first_instruction);
 
   auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
-
+  auto *error_bb = insert_error_bb(function);
   // add redundancy to all
   std::vector<llvm::Instruction *> instructions(inst_cnt);
   for (inst_iterator inst = inst_begin(function), end = inst_end(function);
@@ -303,7 +318,7 @@ size_t harden_all(Function &function, bool thread_safe) {
       add_redundancy(fault_detected_ptr, i, thread_safe);
     }
   }
-  add_integrity_check(function, fault_detected_ptr, thread_safe);
+  add_integrity_check(function, fault_detected_ptr, thread_safe, error_bb);
 
   return 1;
 }
