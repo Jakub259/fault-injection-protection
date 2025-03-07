@@ -1,6 +1,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LLVMContext.h"
@@ -67,6 +68,18 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
 
     IRBuilder<> builder(instruction);
 
+    for (unsigned int i = 0; i < instruction->getNumOperands(); i++) {
+      // "Undef values aren't exactly constants; if they have multiple uses,
+      // they can appear to have different bit patterns at each use."
+
+      // this is *unacceptable* for our purposes, so we replace it with a null
+      if (auto operand = dyn_cast<UndefValue>(instruction->getOperand(i))) {
+        errs() << "Replacing undef value with null: " << *operand << " in "
+               << *instruction << "\n";
+        instruction->setOperand(i, Constant::getNullValue(operand->getType()));
+      }
+    }
+
     auto *tmp1 = instruction->clone();
     tmp1->setName("tmp1");
     builder.Insert(tmp1);
@@ -119,14 +132,14 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
       BasicBlock *before = state->getParent();
       BasicBlock *after = before->splitBasicBlock(last->getNextNode(), "after");
 
-
       auto old_terminator = before->getTerminator();
       IRBuilder<> Builder(old_terminator);
 
       auto *fault_detected_cond =
           Builder.CreateTrunc(state, builder.getInt1Ty(), "", true);
 
-      Builder.CreateCondBr(fault_detected_cond, error_bb, after);
+      auto ProfMD = create_br_weights(state->getContext(), 1, 2000);
+      Builder.CreateCondBr(fault_detected_cond, error_bb, after, ProfMD);
       old_terminator->eraseFromParent();
     }
   }
@@ -181,9 +194,6 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
       fault_detected->setAtomic(AtomicOrdering::Acquire);
     }
 
-    // nuw keyword is present, and any of the truncated bits are non-zero, the
-    // result is a poison value. we use i8 as boolean(i1) so it's safe to
-    // truncate with nuw
     auto *fault_detected_cond =
         Builder.CreateTrunc(fault_detected, Builder.getInt1Ty(), "", true);
 
