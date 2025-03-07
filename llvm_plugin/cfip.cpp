@@ -359,8 +359,6 @@ size_t harden_all(Function &function, bool atomic_state, bool check_asap) {
   return 1;
 }
 
-} // namespace
-
 struct CfipOpts {
   bool atomic_state;
   bool harden_all;
@@ -389,6 +387,8 @@ Expected<CfipOpts> parseCfipOpts(StringRef Params) {
   }
   return Result;
 }
+} // namespace
+
 llvm::PassPluginLibraryInfo getCfipPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
