@@ -103,7 +103,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
     Instruction *block_split_point;
     Instruction *state;
     if (atomic_state) {
-      block_split_point = last = cast<Instruction>(builder.CreateAtomicRMW(
+      state = block_split_point = cast<Instruction>(builder.CreateAtomicRMW(
           AtomicRMWInst::BinOp::Or, fault_detected_ptr, local_fault_detected,
           MaybeAlign(1), AtomicOrdering::AcquireRelease));
     } else {
