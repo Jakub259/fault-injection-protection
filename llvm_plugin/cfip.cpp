@@ -97,31 +97,22 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
       local_fault_detected = builder.CreateOrReduce(local_fault_detected);
     }
 
-    Instruction *last;
-    Instruction *state;
-
-    if (atomic_state) {
-      local_fault_detected =
+    local_fault_detected =
           builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
 
-      state = last = cast<Instruction>(builder.CreateAtomicRMW(
+    Instruction *block_split_point;
+    Instruction *state;
+    if (atomic_state) {
+      state = block_split_point = cast<Instruction>(builder.CreateAtomicRMW(
           AtomicRMWInst::BinOp::Or, fault_detected_ptr, local_fault_detected,
           MaybeAlign(1), AtomicOrdering::AcquireRelease));
     } else {
-      local_fault_detected =
-          builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
-
       // fault_detected |= local_fault_detected
       auto fault_detected =
           builder.CreateLoad(builder.getInt8Ty(), fault_detected_ptr, false);
-
-      local_fault_detected =
-          builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
-
       state = cast<Instruction>(
           builder.CreateOr(fault_detected, local_fault_detected));
-
-      last = builder.CreateStore(state, fault_detected_ptr);
+      block_split_point = builder.CreateStore(state, fault_detected_ptr);
     }
 
     // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
@@ -130,7 +121,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
 
     if (error_bb) {
       BasicBlock *before = state->getParent();
-      BasicBlock *after = before->splitBasicBlock(last->getNextNode(), "after");
+      BasicBlock *after = before->splitBasicBlock(block_split_point->getNextNode(), "after");
 
       auto old_terminator = before->getTerminator();
       IRBuilder<> Builder(old_terminator);
