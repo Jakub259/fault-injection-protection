@@ -104,7 +104,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
           called_fn->getName() + makeHardenedFunctionNameSuffix(args);
       auto M = called_fn->getParent();
 
-      auto small_vec = SmallVector<char>{};
+      SmallVector<char> small_vec;
       auto name = cloned_function_name.toStringRef(small_vec);
       auto cloned_function = M->getFunction(name);
       // check if function is already cloned and hardend
