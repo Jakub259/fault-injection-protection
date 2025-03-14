@@ -298,8 +298,6 @@ size_t harden_fn_args(Function *function,
 
   DenseSet<Value *> users_of_critical_values;
   for (auto &arg : args) {
-    // now that the value is extracted we find all it's users
-    // but all users of my users are also my users (recursively)
     getUsersRec(function->getArg(arg), users_of_critical_values);
   }
   if (users_of_critical_values.empty()) {
@@ -307,11 +305,8 @@ size_t harden_fn_args(Function *function,
   }
 
   auto *error_bb = insert_error_bb(*function);
-  // call function to finalize the protection by adding a check before any
-  // return
   add_integrity_check(*function, fault_detected_ptr, atomic_state, error_bb);
 
-  // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user, atomic_state,
                    check_asap ? error_bb : nullptr, &users_of_critical_values,
@@ -348,8 +343,6 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
 
     auto *critical_value_use = unwrap_call(opaque_call, alloca_builder);
 
-    // now that the value is extracted we find all it's users
-    // but all users of my users are also my users (recursively)
     getUsersRec(critical_value_use, users_of_critical_values);
   }
 
@@ -358,11 +351,8 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
   }
 
   auto *error_bb = insert_error_bb(function);
-  // call function to finalize the protection by adding a check before any
-  // return
   add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
-  // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user, atomic_state,
                    check_asap ? error_bb : nullptr, &users_of_critical_values,
