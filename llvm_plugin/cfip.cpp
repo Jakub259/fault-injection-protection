@@ -110,7 +110,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       // check if function is already cloned and hardend
       if (!cloned_function) {
         ValueToValueMapTy VMap;
-        auto cloned_fn = CloneFunction(called_fn, VMap, nullptr);
+        auto cloned_fn = CloneFunction(called_fn, VMap);
         cloned_fn->setName(cloned_function_name);
         cloned_function = cloned_fn;
         cloned_functions->insert(cloned_function);
