@@ -35,21 +35,6 @@ void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
   }
 }
 
-MDNode *create_br_weights(LLVMContext &Ctx, uint64_t br_weight_l,
-                          uint64_t br_weight_r) {
-  MDBuilder MDBuilder(Ctx);
-  Metadata *branch_weights[] = {
-      MDBuilder.createString("branch_weights"),
-      MDBuilder.createString("expected"),
-      ValueAsMetadata::get(
-          ConstantInt::get(Type::getInt32Ty(Ctx), br_weight_l)),
-      ValueAsMetadata::get(
-          ConstantInt::get(Type::getInt32Ty(Ctx), br_weight_r)),
-  };
-  MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
-  return ProfMD;
-}
-
 std::string makeHardenedFunctionNameSuffix(SmallVector<unsigned> &args) {
   std::string suffix{".hardened"};
   for (auto arg : args) {
@@ -198,9 +183,9 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
 
       auto *fault_detected_cond =
           Builder.CreateTrunc(state, builder.getInt1Ty(), "", true);
-
-      auto ProfMD = create_br_weights(state->getContext(), 1, 2000);
-      Builder.CreateCondBr(fault_detected_cond, error_bb, after, ProfMD);
+      Builder.CreateCondBr(
+          fault_detected_cond, error_bb, after,
+          MDBuilder(state->getContext()).createBranchWeights(1, 2000));
       old_terminator->eraseFromParent();
     }
   }
@@ -258,8 +243,8 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
     auto *fault_detected_cond =
         Builder.CreateTrunc(fault_detected, Builder.getInt1Ty(), "", true);
 
-    auto *ProfMD = create_br_weights(Ctx, 1, 2000);
-    Builder.CreateCondBr(fault_detected_cond, error_bb, new_ret_bb, ProfMD);
+    Builder.CreateCondBr(fault_detected_cond, error_bb, new_ret_bb,
+                         MDBuilder(Ctx).createBranchWeights(1, 2000));
     ret_bb->getTerminator()->eraseFromParent();
   }
 }
