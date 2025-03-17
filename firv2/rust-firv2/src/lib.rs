@@ -90,7 +90,7 @@ fn insert_type_check(item_fn: &mut ItemFn, eq_fn: &str) {
     );
 }
 #[proc_macro_attribute]
-pub fn harden_vars_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn harden_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_fn = syn::parse_macro_input!(item as syn::ItemFn);
     let user_eq_name = attr.to_string();
     let function_name_prefix = format!(
@@ -99,15 +99,12 @@ pub fn harden_vars_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
     item_fn.attrs.push(no_inline_attr());
     let identifier_function_name = format!("{function_name_prefix}identifier");
-    insert_identifier_function(&mut item_fn, &identifier_function_name);
     let eq_fn = format!("{function_name_prefix}eq");
+
+    insert_identifier_function(&mut item_fn, &identifier_function_name);
     insert_eq_function(&mut item_fn, &user_eq_name, &eq_fn);
     insert_type_check(&mut item_fn, &eq_fn);
     insert_identifier_call(&mut item_fn, &identifier_function_name);
-    println!("Harden attr: \"{}\"", attr.to_string());
-    println!(
-        "Harden vars in function: {}",
-        item_fn.to_token_stream().to_string()
-    );
+
     item_fn.to_token_stream().into()
 }

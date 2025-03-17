@@ -9,25 +9,34 @@ using namespace llvm;
 namespace {
 
 struct Firv2 : PassInfoMixin<Firv2> {
-  void build_function(Function *function, Function *original_function) {
+  void build_function(Function *function, Function *original_function,
+                      Function *cmp_function) {
     LLVMContext &Ctx = function->getContext();
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     original_function->addFnAttr(Attribute::NoInline);
     original_function->setCallingConv(CallingConv::Fast);
-    errs() << "Building function " << *function << "\n";
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
     SmallVector<Value *> args_vec;
-    for (auto &arg : function->args()) {
+    for (auto &arg : original_function->args()) {
       args_vec.push_back(&arg);
     }
+
+    auto return_type = original_function->getReturnType();
+    auto stack_var_1 = builder.CreateAlloca(return_type);
+    auto stack_var_2 = builder.CreateAlloca(return_type);
     auto call1 = builder.CreateCall(original_function, {args_vec});
     auto call2 = builder.CreateCall(original_function, {args_vec});
-    auto cmp = builder.CreateCmp(CmpInst::Predicate::ICMP_EQ, call1, call2);
+    builder.CreateStore(call1, stack_var_1);
+    builder.CreateStore(call2, stack_var_2);
+    auto cmp = builder.CreateCall(cmp_function, {stack_var_1, stack_var_2});
+    errs() << "Function: " << *function << "\n";
+
     BasicBlock *return_block =
         BasicBlock::Create(function->getContext(), "return", function);
     BasicBlock *error_block =
         BasicBlock::Create(function->getContext(), "error", function);
+
     builder.CreateCondBr(cmp, return_block, error_block,
                          MDBuilder(Ctx).createBranchWeights(1, 2000));
 
@@ -40,19 +49,53 @@ struct Firv2 : PassInfoMixin<Firv2> {
     error_builder.CreateUnreachable();
   }
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
-    SmallVector<Function *> functions;
+    SmallVector<Value *> hardening_requests;
+    SmallVector<StringRef> IDXs;
+
     for (auto &function : M) {
-      functions.push_back(&function);
+      if (function.isDeclaration()) {
+        continue;
+      }
+      for (auto &bb : function) {
+        for (auto &inst : bb)
+          if (auto call = dyn_cast<CallBase>(&inst)) {
+            if (auto called_function = call->getCalledFunction()) {
+              {
+                auto called_name = called_function->getName();
+                if (called_name.consume_front("internal_firv2_") and
+                    called_name.consume_back("_identifier")) {
+                  hardening_requests.push_back(call);
+                  IDXs.push_back(called_name);
+                  errs() << "Found function to harden: " << function.getName()
+                         << "\n";
+                }
+              }
+            }
+          }
+      }
     }
-    for (auto &function : functions) {
+    for (size_t i = 0; i < hardening_requests.size(); ++i) {
+      auto call = cast<CallBase>(hardening_requests[i]);
+      auto function = call->getCaller();
+      if (function->getType()->isVoidTy()) {
+        errs() << "Skipping void function " << function->getName() << "\n";
+        continue;
+      }
       auto original_name = function->getName();
-      auto new_name = "harden." + original_name;
+      auto new_name = "original." + original_name;
       function->setName(new_name);
-      auto new_function =
-          M.getOrInsertFunction(original_name, function->getFunctionType());
-      build_function(cast<Function>(new_function.getCallee()), function);
+      auto new_function = cast<Function>(
+          M.getOrInsertFunction(original_name, function->getFunctionType())
+              .getCallee());
+
+      auto cmp_name = ("internal_firv2_" + IDXs[i] + "_eq").str();
+      auto cmp_func =
+          cast<Function>(M.getOrInsertFunction(cmp_name, nullptr).getCallee());
+
+      build_function(new_function, function, cmp_func);
+      call->eraseFromParent();
     }
-    if (not functions.empty()) {
+    if (not hardening_requests.empty()) {
       return PreservedAnalyses::none();
     } else {
       return PreservedAnalyses::all();
