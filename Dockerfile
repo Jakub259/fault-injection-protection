@@ -30,5 +30,10 @@ RUN . "$HOME/.cargo/env" && \
     cd rust_attribute && \
     cargo b
 
+# BUILD rust macro
+RUN . "$HOME/.cargo/env" && \
+    cd firv2/rust-firv2 && \
+    cargo b
+
 # LLVM tests
 RUN lit tests -v
