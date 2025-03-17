@@ -10,7 +10,7 @@ namespace {
 
 struct Firv2 : PassInfoMixin<Firv2> {
   void build_function(Function *function, Function *original_function) {
-    LLVMContext & Ctx = function->getContext();
+    LLVMContext &Ctx = function->getContext();
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     original_function->addFnAttr(Attribute::NoInline);
     original_function->setCallingConv(CallingConv::Fast);
@@ -40,8 +40,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
     error_builder.CreateUnreachable();
   }
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
-    bool modified = false;
-    std::vector<Function *> functions;
+    SmallVector<Function *> functions;
     for (auto &function : M) {
       functions.push_back(&function);
     }
@@ -53,7 +52,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
           M.getOrInsertFunction(original_name, function->getFunctionType());
       build_function(cast<Function>(new_function.getCallee()), function);
     }
-    if (modified) {
+    if (not functions.empty()) {
       return PreservedAnalyses::none();
     } else {
       return PreservedAnalyses::all();
