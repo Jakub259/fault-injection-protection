@@ -12,6 +12,7 @@
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/SROA.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 using namespace llvm;
 #define DEBUG_TYPE "cfip"
@@ -19,38 +20,91 @@ using namespace llvm;
 namespace {
 
 void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
-  OutSV.insert(U);
-  for (auto *user : U->users()) {
-    getUsersRec(user, OutSV);
+  std::vector<Value *> toProcess;
+  toProcess.push_back(U);
+
+  while (!toProcess.empty()) {
+    Value *currentUser = toProcess.back();
+    toProcess.pop_back();
+
+    if (OutSV.insert(currentUser).second) {
+      for (auto *user : currentUser->users()) {
+        toProcess.push_back(user);
+      }
+    }
   }
 }
 
-MDNode *create_br_weights(LLVMContext &Ctx, uint64_t br_weight_l,
-                          uint64_t br_weight_r) {
-  MDBuilder MDBuilder(Ctx);
-  Metadata *branch_weights[] = {
-      MDBuilder.createString("branch_weights"),
-      MDBuilder.createString("expected"),
-      ValueAsMetadata::get(
-          ConstantInt::get(Type::getInt32Ty(Ctx), br_weight_l)),
-      ValueAsMetadata::get(
-          ConstantInt::get(Type::getInt32Ty(Ctx), br_weight_r)),
-  };
-  MDNode *ProfMD = MDNode::get(Ctx, branch_weights);
-  return ProfMD;
+std::string makeHardenedFunctionNameSuffix(SmallVector<unsigned> &args) {
+  std::string suffix{".hardened"};
+  for (auto arg : args) {
+    suffix += "." + std::to_string(arg);
+  }
+  return suffix;
 }
 
-void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
-                    bool atomic_state, llvm::BasicBlock *error_bb) {
-  // before: x = a + b
+size_t harden_fn_args(Function *function,
+                      DenseSet<Function *> *cloned_functions, bool atomic_state,
+                      bool check_asap, SmallVector<unsigned> &args);
+
+void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
+                    bool atomic_state, llvm::BasicBlock *error_bb,
+                    DenseSet<Value *> *users_of_critical_values = nullptr,
+                    DenseSet<Function *> *cloned_functions = nullptr) {
+  // the cloned_functions must be present if users_of_critical_values is present
+  assert(!users_of_critical_values || cloned_functions);
+  // before: x = a `op` b
   // after:
-  //    tmp1 = a + b
-  //    tmp2 = a + b
-  //    local_fault_detected = tmp1 != tmp2
+  //    result1 = a `op` b
+  //    result2 = a `op` b
+  //    local_fault_detected = result1 != result2
   //    fault_detected |= local_fault_detected
-  auto *instruction = dyn_cast<Instruction>(value);
+  auto *instruction = dyn_cast<Instruction>(user);
   if (!instruction) {
+    /* errs() << "Skipping non-instruction: " << *instruction << "\n"; */
     return;
+  }
+
+  // if there are no users there will be no calls to harden
+  if (users_of_critical_values) {
+    if (auto *call_inst = dyn_cast<CallBase>(instruction)) {
+      SmallVector<unsigned> args{};
+      for (unsigned i = 0; i < call_inst->getNumOperands(); i++) {
+        auto *operand = call_inst->getOperand(i);
+        if (users_of_critical_values->contains(operand)) {
+          args.push_back(i);
+        }
+      }
+      // the call does not use any critical values
+      if (args.empty()) {
+        return;
+      }
+      auto *called_fn = call_inst->getCalledFunction();
+      if (called_fn->isDeclaration()) {
+        errs() << "Skipping declaration: " << called_fn->getName() << "\n";
+        return;
+      }
+      // clone the function to harden
+      auto cloned_function_name =
+          called_fn->getName() + makeHardenedFunctionNameSuffix(args);
+      auto M = called_fn->getParent();
+
+      SmallVector<char> small_vec;
+      auto name = cloned_function_name.toStringRef(small_vec);
+      auto cloned_function = M->getFunction(name);
+      // check if function is already cloned and hardend
+      if (!cloned_function) {
+        ValueToValueMapTy VMap;
+        auto cloned_fn = CloneFunction(called_fn, VMap);
+        cloned_fn->setName(cloned_function_name);
+        cloned_function = cloned_fn;
+        cloned_functions->insert(cloned_function);
+        harden_fn_args(cloned_function, cloned_functions, atomic_state,
+                       static_cast<bool>(error_bb), args);
+      }
+
+      call_inst->setCalledFunction(cloned_function);
+    }
   }
 
   if (isa<BinaryOperator>(instruction) or isa<UnaryOperator>(instruction) or
@@ -98,7 +152,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
     }
 
     local_fault_detected =
-          builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
+        builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
 
     Instruction *block_split_point;
     Instruction *state;
@@ -121,16 +175,17 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *value,
 
     if (error_bb) {
       BasicBlock *before = state->getParent();
-      BasicBlock *after = before->splitBasicBlock(block_split_point->getNextNode(), "after");
+      BasicBlock *after =
+          before->splitBasicBlock(block_split_point->getNextNode(), "after");
 
       auto old_terminator = before->getTerminator();
       IRBuilder<> Builder(old_terminator);
 
       auto *fault_detected_cond =
           Builder.CreateTrunc(state, builder.getInt1Ty(), "", true);
-
-      auto ProfMD = create_br_weights(state->getContext(), 1, 2000);
-      Builder.CreateCondBr(fault_detected_cond, error_bb, after, ProfMD);
+      Builder.CreateCondBr(
+          fault_detected_cond, error_bb, after,
+          MDBuilder(state->getContext()).createBranchWeights(1, 2000));
       old_terminator->eraseFromParent();
     }
   }
@@ -188,8 +243,8 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
     auto *fault_detected_cond =
         Builder.CreateTrunc(fault_detected, Builder.getInt1Ty(), "", true);
 
-    auto *ProfMD = create_br_weights(Ctx, 1, 2000);
-    Builder.CreateCondBr(fault_detected_cond, error_bb, new_ret_bb, ProfMD);
+    Builder.CreateCondBr(fault_detected_cond, error_bb, new_ret_bb,
+                         MDBuilder(Ctx).createBranchWeights(1, 2000));
     ret_bb->getTerminator()->eraseFromParent();
   }
 }
@@ -229,7 +284,40 @@ llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
   return fault_detected_ptr;
 }
 
-size_t harden_chosen(Function &function, bool atomic_state, bool check_asap) {
+size_t harden_fn_args(Function *function,
+                      DenseSet<Function *> *cloned_functions, bool atomic_state,
+                      bool check_asap, SmallVector<unsigned> &args) {
+  LLVMContext &Ctx = function->getContext();
+
+  llvm::Instruction *first_instruction = &*inst_begin(function);
+  // note: the builder is used to create alloca
+  // it should point to begin of entry block
+  llvm::IRBuilder<> alloca_builder(first_instruction);
+
+  auto fault_detected_ptr = insert_bool(alloca_builder, Ctx);
+
+  DenseSet<Value *> users_of_critical_values;
+  for (auto &arg : args) {
+    getUsersRec(function->getArg(arg), users_of_critical_values);
+  }
+  if (users_of_critical_values.empty()) {
+    return 0;
+  }
+
+  auto *error_bb = insert_error_bb(*function);
+  add_integrity_check(*function, fault_detected_ptr, atomic_state, error_bb);
+
+  for (auto *user : users_of_critical_values) {
+    add_redundancy(fault_detected_ptr, user, atomic_state,
+                   check_asap ? error_bb : nullptr, &users_of_critical_values,
+                   cloned_functions);
+  }
+
+  return 1;
+}
+
+size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
+                     bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
 
   // In 99.9% cases there should be no more than one
@@ -255,20 +343,20 @@ size_t harden_chosen(Function &function, bool atomic_state, bool check_asap) {
 
     auto *critical_value_use = unwrap_call(opaque_call, alloca_builder);
 
-    // now that the value is extracted we find all it's users
-    // but all users of my users are also my users (recursively)
     getUsersRec(critical_value_use, users_of_critical_values);
   }
 
+  if (users_of_critical_values.empty()) {
+    return 0;
+  }
+
   auto *error_bb = insert_error_bb(function);
-  // call function to finalize the protection by adding a check before any
-  // return
   add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
-  // add redundancy to all users of critical values
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user, atomic_state,
-                   check_asap ? error_bb : nullptr);
+                   check_asap ? error_bb : nullptr, &users_of_critical_values,
+                   cloned_functions);
   }
 
   return opaque_calls.size();
@@ -285,6 +373,7 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
   F.addFnAttr(Attribute::OptimizeNone);
   // required be OptimizeNone
   F.addFnAttr(Attribute::NoInline);
+  F.removeFnAttr(Attribute::OptimizeForDebugging);
   F.removeFnAttr(Attribute::OptimizeForSize);
   F.removeFnAttr(Attribute::MinSize);
   F.removeFnAttr(Attribute::AlwaysInline);
@@ -293,22 +382,36 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
 template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   const bool atomic_state;
   const bool check_asap;
-  Cfip(bool atomic_state_ = false, bool check_asap_ = false)
-      : atomic_state(atomic_state_), check_asap{check_asap_} {}
+  const bool only_on_fullLTO;
+  Cfip(bool atomic_state_ = false, bool check_asap_ = false,
+       bool only_on_fullLTO_ = false)
+      : atomic_state(atomic_state_), check_asap{check_asap_},
+        only_on_fullLTO{only_on_fullLTO_} {}
 
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
+    if (only_on_fullLTO) {
+      // it appears that rustc only add this ModuleFlag when it's linking
+      if (not M.getModuleFlag("PIE Level"))
+        return PreservedAnalyses::all();
+    }
+
+    bool modified = false;
     FunctionAnalysisManager *FAM =
         &AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-    DenseSet<Function *> hardened_functions;
+    DenseSet<Function *> cloned_functions;
 
     for (auto &F : M) {
-      if (Fn(F, atomic_state, check_asap)) {
+      if (Fn(F, &cloned_functions, atomic_state, check_asap)) {
         finalize(F, *FAM);
-        hardened_functions.insert(&F);
+        modified = true;
       }
     }
 
-    if (hardened_functions.empty()) {
+    for (auto F : cloned_functions) {
+      finalize(*F, *FAM);
+    }
+
+    if (modified) {
       return PreservedAnalyses::none();
     } else {
       return PreservedAnalyses::all();
@@ -318,7 +421,8 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   static bool isRequired() { return true; }
 };
 
-size_t harden_all(Function &function, bool atomic_state, bool check_asap) {
+size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
+                  bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
   auto inst_cnt = function.getInstructionCount();
   if (!inst_cnt)
@@ -342,6 +446,8 @@ size_t harden_all(Function &function, bool atomic_state, bool check_asap) {
 
   for (auto *i : instructions) {
     if (i) {
+      // we are hardening everything we can in each function
+      // thus we do not need to recurse into function calls
       add_redundancy(fault_detected_ptr, i, atomic_state,
                      check_asap ? error_bb : nullptr);
     }
@@ -354,10 +460,7 @@ struct CfipOpts {
   bool atomic_state;
   bool harden_all;
   bool check_asap;
-  CfipOpts(bool atomic_state_ = false, bool harden_all_ = false,
-           bool check_asap_ = false)
-      : atomic_state(atomic_state_), harden_all(harden_all_),
-        check_asap(check_asap_) {}
+  bool only_on_fullLTO;
 };
 Expected<CfipOpts> parseCfipOpts(StringRef Params) {
   CfipOpts Result{};
@@ -372,6 +475,8 @@ Expected<CfipOpts> parseCfipOpts(StringRef Params) {
       Result.harden_all = Enable;
     else if (ParamName == "check-asap")
       Result.check_asap = Enable;
+    else if (ParamName == "only-on-fullLTO")
+      Result.only_on_fullLTO = Enable;
     else
       return make_error<StringError>("Unknown parameter: " + ParamName,
                                      inconvertibleErrorCode());
@@ -393,16 +498,15 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
                       errs() << Params.takeError();
                       exit(EXIT_FAILURE);
                     }
-
                     if (Params->harden_all) {
                       MPM.addPass(Cfip<harden_all>{Params->atomic_state,
-                                                   Params->check_asap});
+                                                   Params->check_asap,
+                                                   Params->only_on_fullLTO});
                     } else {
                       MPM.addPass(Cfip<harden_chosen>{Params->atomic_state,
-                                                      Params->check_asap});
+                                                      Params->check_asap,
+                                                      Params->only_on_fullLTO});
                     }
-                    errs() << "CFIP: " << Params->harden_all << " "
-                           << Params->atomic_state << "\n";
                     return true;
                   }
                   return false;
