@@ -13,8 +13,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
                       Function *cmp_function) {
     LLVMContext &Ctx = function->getContext();
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    original_function->addFnAttr(Attribute::NoInline);
-    original_function->setCallingConv(CallingConv::Fast);
+    original_function->addFnAttr(Attribute::InlineHint);
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
     SmallVector<Value *> args_vec;
@@ -25,12 +24,19 @@ struct Firv2 : PassInfoMixin<Firv2> {
     auto return_type = original_function->getReturnType();
     auto stack_var_1 = builder.CreateAlloca(return_type);
     auto stack_var_2 = builder.CreateAlloca(return_type);
+
     auto call1 = builder.CreateCall(original_function, {args_vec});
-    auto call2 = builder.CreateCall(original_function, {args_vec});
+    call1->setCallingConv(original_function->getCallingConv());
+
+    auto call2 = call1->clone();
+    call2->insertAfter(call1);
+
     builder.CreateStore(call1, stack_var_1);
     builder.CreateStore(call2, stack_var_2);
     auto cmp = builder.CreateCall(cmp_function, {stack_var_1, stack_var_2});
-    errs() << "Function: " << *function << "\n";
+    call1->setCallingConv(cmp_function->getCallingConv());
+    cmp_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+    cmp_function->addFnAttr(Attribute::InlineHint);
 
     BasicBlock *return_block =
         BasicBlock::Create(function->getContext(), "return", function);
