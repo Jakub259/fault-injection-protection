@@ -1,3 +1,4 @@
+#include <utility>
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/MDBuilder.h"
@@ -13,8 +14,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
                       Function *cmp_function) {
     LLVMContext &Ctx = function->getContext();
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    original_function->addFnAttr(Attribute::NoInline);
-    original_function->setCallingConv(CallingConv::Fast);
+    original_function->addFnAttr(Attribute::InlineHint);
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
     SmallVector<Value *> args_vec;
@@ -25,12 +25,19 @@ struct Firv2 : PassInfoMixin<Firv2> {
     auto return_type = original_function->getReturnType();
     auto stack_var_1 = builder.CreateAlloca(return_type);
     auto stack_var_2 = builder.CreateAlloca(return_type);
+
     auto call1 = builder.CreateCall(original_function, {args_vec});
-    auto call2 = builder.CreateCall(original_function, {args_vec});
+    call1->setCallingConv(original_function->getCallingConv());
+
+    auto call2 = call1->clone();
+    call2->insertAfter(call1);
+
     builder.CreateStore(call1, stack_var_1);
     builder.CreateStore(call2, stack_var_2);
     auto cmp = builder.CreateCall(cmp_function, {stack_var_1, stack_var_2});
-    errs() << "Function: " << *function << "\n";
+    call1->setCallingConv(cmp_function->getCallingConv());
+    cmp_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+    cmp_function->addFnAttr(Attribute::InlineHint);
 
     BasicBlock *return_block =
         BasicBlock::Create(function->getContext(), "return", function);
@@ -49,8 +56,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
     error_builder.CreateUnreachable();
   }
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
-    SmallVector<Value *> hardening_requests;
-    SmallVector<StringRef> IDXs;
+    SmallVector<std::pair<Value *, StringRef>> hardening_requests;
 
     for (auto &function : M) {
       if (function.isDeclaration()) {
@@ -64,8 +70,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
                 auto called_name = called_function->getName();
                 if (called_name.consume_front("internal_firv2_") and
                     called_name.consume_back("_identifier")) {
-                  hardening_requests.push_back(call);
-                  IDXs.push_back(called_name);
+                  hardening_requests.push_back({call, called_name});
                   errs() << "Found function to harden: " << function.getName()
                          << "\n";
                 }
@@ -74,31 +79,31 @@ struct Firv2 : PassInfoMixin<Firv2> {
           }
       }
     }
-    for (size_t i = 0; i < hardening_requests.size(); ++i) {
-      auto call = cast<CallBase>(hardening_requests[i]);
+    for (auto &[hardening_request, IDX] : hardening_requests) {
+      auto call = cast<CallBase>(hardening_request);
       auto function = call->getCaller();
+      auto original_name = function->getName();
       if (function->getType()->isVoidTy()) {
-        errs() << "Skipping void function " << function->getName() << "\n";
+        errs() << "Skipping void function " << original_name << "\n";
         continue;
       }
-      auto original_name = function->getName();
       auto new_name = "original." + original_name;
       function->setName(new_name);
       auto new_function = cast<Function>(
           M.getOrInsertFunction(original_name, function->getFunctionType())
               .getCallee());
 
-      auto cmp_name = ("internal_firv2_" + IDXs[i] + "_eq").str();
+      auto cmp_name = ("internal_firv2_" + IDX + "_eq").str();
       auto cmp_func =
           cast<Function>(M.getOrInsertFunction(cmp_name, nullptr).getCallee());
 
       build_function(new_function, function, cmp_func);
       call->eraseFromParent();
     }
-    if (not hardening_requests.empty()) {
-      return PreservedAnalyses::none();
-    } else {
+    if (hardening_requests.empty()) {
       return PreservedAnalyses::all();
+    } else {
+      return PreservedAnalyses::none();
     }
   }
 
