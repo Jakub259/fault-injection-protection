@@ -53,19 +53,12 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
                     DenseSet<Function *> *cloned_functions = nullptr) {
   // the cloned_functions must be present if users_of_critical_values is present
   assert(!users_of_critical_values || cloned_functions);
-  // before: x = a `op` b
-  // after:
-  //    result1 = a `op` b
-  //    result2 = a `op` b
-  //    local_fault_detected = result1 != result2
-  //    fault_detected |= local_fault_detected
   auto *instruction = dyn_cast<Instruction>(user);
   if (!instruction) {
     /* errs() << "Skipping non-instruction: " << *instruction << "\n"; */
     return;
   }
 
-  // if there are no users there will be no calls to harden
   if (users_of_critical_values) {
     if (auto *call_inst = dyn_cast<CallBase>(instruction)) {
       SmallVector<unsigned> args{};
@@ -90,14 +83,13 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       auto M = called_fn->getParent();
 
       SmallVector<char> small_vec;
-      auto name = cloned_function_name.toStringRef(small_vec);
-      auto cloned_function = M->getFunction(name);
+      auto cloned_function =
+          M->getFunction(cloned_function_name.toStringRef(small_vec));
       // check if function is already cloned and hardend
       if (!cloned_function) {
         ValueToValueMapTy VMap;
-        auto cloned_fn = CloneFunction(called_fn, VMap);
-        cloned_fn->setName(cloned_function_name);
-        cloned_function = cloned_fn;
+        cloned_function = CloneFunction(called_fn, VMap);
+        cloned_function->setName(cloned_function_name);
         cloned_functions->insert(cloned_function);
         harden_fn_args(cloned_function, cloned_functions, atomic_state,
                        static_cast<bool>(error_bb), args);
@@ -107,8 +99,17 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
     }
   }
 
+  Value *local_fault_detected{0};
+  IRBuilder<> builder(instruction);
   if (isa<BinaryOperator>(instruction) or isa<UnaryOperator>(instruction) or
-      isa<SelectInst>(instruction) or isa<CmpInst>(instruction)) {
+      isa<SelectInst>(instruction) or isa<CmpInst>(instruction) or
+      isa<PHINode>(instruction)) {
+    // before: x = a `op` b
+    // after:
+    //    result1 = a `op` b
+    //    result2 = a `op` b
+    //    local_fault_detected = result1 != result2
+    //    fault_detected |= local_fault_detected
 
     const auto *inst_Ty = instruction->getType();
 
@@ -119,8 +120,6 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       return;
 
     errs() << "Adding redundancy to: " << *instruction << "\n";
-
-    IRBuilder<> builder(instruction);
 
     for (unsigned int i = 0; i < instruction->getNumOperands(); i++) {
       // "Undef values aren't exactly constants; if they have multiple uses,
@@ -143,7 +142,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
     builder.Insert(tmp2);
 
     // tmp1 != tmp2
-    Value *local_fault_detected =
+    local_fault_detected =
         builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
 
     // if it's vector we need to reduce it to scalar
@@ -154,40 +153,45 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
     local_fault_detected =
         builder.CreateZExt(local_fault_detected, builder.getInt8Ty());
 
-    Instruction *block_split_point;
-    Instruction *state;
-    if (atomic_state) {
-      state = block_split_point = cast<Instruction>(builder.CreateAtomicRMW(
-          AtomicRMWInst::BinOp::Or, fault_detected_ptr, local_fault_detected,
-          MaybeAlign(1), AtomicOrdering::AcquireRelease));
-    } else {
-      // fault_detected |= local_fault_detected
-      auto fault_detected =
-          builder.CreateLoad(builder.getInt8Ty(), fault_detected_ptr, false);
-      state = cast<Instruction>(
-          builder.CreateOr(fault_detected, local_fault_detected));
-      block_split_point = builder.CreateStore(state, fault_detected_ptr);
-    }
-
     // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
     instruction->replaceAllUsesWith(tmp1);
     instruction->eraseFromParent();
+  }
+  if (!local_fault_detected)
+    return;
 
-    if (error_bb) {
-      BasicBlock *before = state->getParent();
-      BasicBlock *after =
-          before->splitBasicBlock(block_split_point->getNextNode(), "after");
+  // finalize
+  Instruction *block_split_point, *state;
+  builder.SetInsertPoint(
+      cast<Instruction>(local_fault_detected)->getNextNode());
 
-      auto old_terminator = before->getTerminator();
-      IRBuilder<> Builder(old_terminator);
+  if (atomic_state) {
+    state = block_split_point = cast<Instruction>(builder.CreateAtomicRMW(
+        AtomicRMWInst::BinOp::Or, fault_detected_ptr, local_fault_detected,
+        MaybeAlign(1), AtomicOrdering::AcquireRelease));
+  } else {
+    // fault_detected |= local_fault_detected
+    auto fault_detected =
+        builder.CreateLoad(builder.getInt8Ty(), fault_detected_ptr, false);
+    state = cast<Instruction>(
+        builder.CreateOr(fault_detected, local_fault_detected));
+    block_split_point = builder.CreateStore(state, fault_detected_ptr);
+  }
 
-      auto *fault_detected_cond =
-          Builder.CreateTrunc(state, builder.getInt1Ty(), "", true);
-      Builder.CreateCondBr(
-          fault_detected_cond, error_bb, after,
-          MDBuilder(state->getContext()).createBranchWeights(1, 2000));
-      old_terminator->eraseFromParent();
-    }
+  if (error_bb) {
+    BasicBlock *before = state->getParent();
+    BasicBlock *after =
+        before->splitBasicBlock(block_split_point->getNextNode(), "after");
+
+    auto old_terminator = before->getTerminator();
+    IRBuilder<> Builder(old_terminator);
+
+    auto *fault_detected_cond =
+        Builder.CreateTrunc(state, builder.getInt1Ty(), "", true);
+    Builder.CreateCondBr(
+        fault_detected_cond, error_bb, after,
+        MDBuilder(state->getContext()).createBranchWeights(1, 2000));
+    old_terminator->eraseFromParent();
   }
 }
 
@@ -289,10 +293,9 @@ size_t harden_fn_args(Function *function,
                       bool check_asap, SmallVector<unsigned> &args) {
   LLVMContext &Ctx = function->getContext();
 
-  llvm::Instruction *first_instruction = &*inst_begin(function);
   // note: the builder is used to create alloca
   // it should point to begin of entry block
-  llvm::IRBuilder<> alloca_builder(first_instruction);
+  llvm::IRBuilder<> alloca_builder(&function->getEntryBlock().front());
 
   auto fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
@@ -305,13 +308,13 @@ size_t harden_fn_args(Function *function,
   }
 
   auto *error_bb = insert_error_bb(*function);
-  add_integrity_check(*function, fault_detected_ptr, atomic_state, error_bb);
 
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user, atomic_state,
                    check_asap ? error_bb : nullptr, &users_of_critical_values,
                    cloned_functions);
   }
+  add_integrity_check(*function, fault_detected_ptr, atomic_state, error_bb);
 
   return 1;
 }
@@ -327,10 +330,9 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
   if (opaque_calls.empty())
     return 0;
 
-  llvm::Instruction *first_instruction = &*inst_begin(function);
   // note: the builder is used to create alloca
   // it should point to begin of entry block
-  llvm::IRBuilder<> alloca_builder(first_instruction);
+  llvm::IRBuilder<> alloca_builder(&function.getEntryBlock().front());
 
   auto fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
@@ -351,13 +353,13 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
   }
 
   auto *error_bb = insert_error_bb(function);
-  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   for (auto *user : users_of_critical_values) {
     add_redundancy(fault_detected_ptr, user, atomic_state,
                    check_asap ? error_bb : nullptr, &users_of_critical_values,
                    cloned_functions);
   }
+  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   return opaque_calls.size();
 }
@@ -428,10 +430,9 @@ size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
   if (!inst_cnt)
     return 0;
 
-  llvm::Instruction *first_instruction = &*inst_begin(function);
   // note: the builder is used to create alloca
   // it should point to begin of entry block
-  llvm::IRBuilder<> alloca_builder(first_instruction);
+  llvm::IRBuilder<> alloca_builder(&function.getEntryBlock().front());
 
   auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
   auto *error_bb = insert_error_bb(function);
@@ -442,8 +443,6 @@ size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
     instructions.push_back(&*inst);
   }
 
-  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
-
   for (auto *i : instructions) {
     if (i) {
       // we are hardening everything we can in each function
@@ -452,6 +451,7 @@ size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
                      check_asap ? error_bb : nullptr);
     }
   }
+  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   return 1;
 }
