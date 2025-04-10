@@ -11,6 +11,7 @@
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Transforms/Scalar/DCE.h"
+#include "llvm/Transforms/Scalar/Reg2Mem.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
@@ -97,6 +98,90 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
 
       call_inst->setCalledFunction(cloned_function);
     }
+  }
+  if (auto branch_inst = dyn_cast<llvm::BranchInst>(instruction)) {
+    if (branch_inst->isConditional()) {
+      errs() << "Hardening" << *instruction << '\n';
+      /*
+ // before :
+if (cond)
+{
+  <true case>
+}
+else
+{
+  <false case>
+}
+// after:
+chosen_case = 0
+if (cond)
+{
+  local_fault_detected = chosen_case != true
+  <true case>
+}
+else
+{
+  local_fault_detected = chosen_case == true
+  <false case>
+}
+*/
+      auto *function = branch_inst->getFunction();
+      auto *cond = branch_inst->getCondition();
+      auto replace_successors_if_needed =
+          [function, branch_inst](unsigned int i, StringRef name) {
+            ValueToValueMapTy VMap;
+            auto *bb = branch_inst->getSuccessor(i);
+            if (bb->hasNPredecessorsOrMore(2)) {
+              auto *cloned_bb = CloneBasicBlock(bb, VMap, name, function);
+              remapInstructionsInBlocks({cloned_bb}, VMap);
+              branch_inst->setSuccessor(i, cloned_bb);
+              return cloned_bb;
+            } else {
+              return bb;
+            }
+          };
+
+      auto *true_bb = replace_successors_if_needed(0, ".clone");
+      auto *false_bb = replace_successors_if_needed(1, ".clone");
+      // Create a variable to track the chosen branch
+      IRBuilder<> builder(&function->getEntryBlock().front());
+      auto *chosen_branch =
+          builder.CreateAlloca(builder.getInt1Ty(), nullptr, "chosen_branch");
+
+      builder.SetInsertPoint(branch_inst);
+      builder.CreateStore(builder.CreateNeg(cond), chosen_branch);
+
+      // Update true_bb and false_bb to include fault detection
+      {
+        builder.SetInsertPoint(&*true_bb->getFirstInsertionPt());
+        auto *true_branch_fault = builder.CreateICmpNE(
+            builder.CreateLoad(builder.getInt1Ty(), chosen_branch, false),
+            ConstantInt::getTrue(builder.getInt1Ty()), "true_branch_fault");
+        auto *true_branch_fault_ext =
+            builder.CreateZExt(true_branch_fault, builder.getInt8Ty());
+        builder.CreateStore(
+            builder.CreateOr(builder.CreateLoad(builder.getInt8Ty(),
+                                                fault_detected_ptr, false),
+                             true_branch_fault_ext),
+            fault_detected_ptr);
+      }
+
+      {
+        builder.SetInsertPoint(&*false_bb->getFirstInsertionPt());
+        auto *false_branch_fault = builder.CreateICmpNE(
+            builder.CreateLoad(builder.getInt1Ty(), chosen_branch, false),
+            ConstantInt::getFalse(builder.getInt1Ty()), "false_branch_fault");
+        auto *false_branch_fault_ext =
+            builder.CreateZExt(false_branch_fault, builder.getInt8Ty());
+        builder.CreateStore(
+            builder.CreateOr(builder.CreateLoad(builder.getInt8Ty(),
+                                                fault_detected_ptr, false),
+                             false_branch_fault_ext),
+            fault_detected_ptr);
+      }
+    }
+
+    return;
   }
 
   Value *local_fault_detected{0};
@@ -486,32 +571,36 @@ Expected<CfipOpts> parseCfipOpts(StringRef Params) {
 } // namespace
 
 llvm::PassPluginLibraryInfo getCfipPluginInfo() {
-  return {LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
-          [](PassBuilder &PB) {
-            PB.registerPipelineParsingCallback(
-                [](StringRef Name, ModulePassManager &MPM,
-                   ArrayRef<PassBuilder::PipelineElement>) {
-                  if (PassBuilder::checkParametrizedPassName(Name, "cfip")) {
-                    auto Params = PassBuilder::parsePassParameters(
-                        parseCfipOpts, Name, "cfip");
-                    if (!Params) {
-                      errs() << Params.takeError();
-                      exit(EXIT_FAILURE);
-                    }
-                    if (Params->harden_all) {
-                      MPM.addPass(Cfip<harden_all>{Params->atomic_state,
-                                                   Params->check_asap,
-                                                   Params->only_on_fullLTO});
-                    } else {
-                      MPM.addPass(Cfip<harden_chosen>{Params->atomic_state,
-                                                      Params->check_asap,
-                                                      Params->only_on_fullLTO});
-                    }
-                    return true;
-                  }
-                  return false;
-                });
-          }};
+  return {
+      LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
+      [](PassBuilder &PB) {
+        PB.registerPipelineParsingCallback(
+            [](StringRef Name, ModulePassManager &MPM,
+               ArrayRef<PassBuilder::PipelineElement>) {
+              if (PassBuilder::checkParametrizedPassName(Name, "cfip")) {
+                auto Params = PassBuilder::parsePassParameters(parseCfipOpts,
+                                                               Name, "cfip");
+                if (!Params) {
+                  errs() << Params.takeError();
+                  exit(EXIT_FAILURE);
+                }
+                // Get rid of PHI nodes in case where we have branches to harden
+                MPM.addPass(createModuleToFunctionPassAdaptor(RegToMemPass()));
+
+                if (Params->harden_all) {
+                  MPM.addPass(Cfip<harden_all>{Params->atomic_state,
+                                               Params->check_asap,
+                                               Params->only_on_fullLTO});
+                } else {
+                  MPM.addPass(Cfip<harden_chosen>{Params->atomic_state,
+                                                  Params->check_asap,
+                                                  Params->only_on_fullLTO});
+                }
+                return true;
+              }
+              return false;
+            });
+      }};
 }
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
