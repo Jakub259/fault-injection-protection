@@ -150,36 +150,38 @@ else
 
       builder.SetInsertPoint(branch_inst);
 
-      // we set negation of cond, so thus the target branch has to fix it
+      // we set negation of cond, so that the target branch has to fix it
       builder.CreateStore(builder.CreateNeg(cond, "unexpected_result"),
                           chosen_branch);
 
+      auto *i1_ty = builder.getInt1Ty();
+      auto *i8_ty = builder.getInt8Ty();
       // Update true_bb and false_bb to include fault detection
       {
         builder.SetInsertPoint(&*true_bb->getFirstInsertionPt());
         auto *true_branch_fault = builder.CreateICmpNE(
-            builder.CreateLoad(builder.getInt1Ty(), chosen_branch, false),
-            ConstantInt::getTrue(builder.getInt1Ty()), "true_branch_fault");
+            builder.CreateLoad(i1_ty, chosen_branch, false),
+            ConstantInt::getTrue(i1_ty), "true_branch_fault");
         auto *true_branch_fault_ext =
-            builder.CreateZExt(true_branch_fault, builder.getInt8Ty());
+            builder.CreateZExt(true_branch_fault, i8_ty);
         builder.CreateStore(
-            builder.CreateOr(builder.CreateLoad(builder.getInt8Ty(),
-                                                fault_detected_ptr, false),
-                             true_branch_fault_ext),
+            builder.CreateOr(
+                builder.CreateLoad(i8_ty, fault_detected_ptr, false),
+                true_branch_fault_ext),
             fault_detected_ptr);
       }
 
       {
         builder.SetInsertPoint(&*false_bb->getFirstInsertionPt());
         auto *false_branch_fault = builder.CreateICmpNE(
-            builder.CreateLoad(builder.getInt1Ty(), chosen_branch, false),
-            ConstantInt::getFalse(builder.getInt1Ty()), "false_branch_fault");
+            builder.CreateLoad(i1_ty, chosen_branch, false),
+            ConstantInt::getFalse(i1_ty), "false_branch_fault");
         auto *false_branch_fault_ext =
-            builder.CreateZExt(false_branch_fault, builder.getInt8Ty());
+            builder.CreateZExt(false_branch_fault, i8_ty);
         builder.CreateStore(
-            builder.CreateOr(builder.CreateLoad(builder.getInt8Ty(),
-                                                fault_detected_ptr, false),
-                             false_branch_fault_ext),
+            builder.CreateOr(
+                builder.CreateLoad(i8_ty, fault_detected_ptr, false),
+                false_branch_fault_ext),
             fault_detected_ptr);
       }
     }
