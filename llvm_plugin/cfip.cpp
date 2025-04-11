@@ -149,7 +149,10 @@ else
           builder.CreateAlloca(builder.getInt1Ty(), nullptr, "chosen_branch");
 
       builder.SetInsertPoint(branch_inst);
-      builder.CreateStore(builder.CreateNeg(cond), chosen_branch);
+
+      // we set negation of cond, so thus the target branch has to fix it
+      builder.CreateStore(builder.CreateNeg(cond, "unexpected_result"),
+                          chosen_branch);
 
       // Update true_bb and false_bb to include fault detection
       {
