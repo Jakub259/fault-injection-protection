@@ -23,10 +23,20 @@ fn insert_eq_function(item_fn: &mut ItemFn, user_eq_name: &str, function_name: &
     let eq_function_name = syn::Ident::new(function_name, Span::call_site().into());
     let user_eq_name: syn::ExprPath =
         syn::parse_str(user_eq_name).expect("expected ExprPath, e.g. i32::eq");
+
     let return_type = match &item_fn.sig.output {
         ReturnType::Type(_, t) => t,
         _ => panic!("Function must have a return type"),
     };
+
+    item_fn.sig.inputs.iter().for_each(|arg| {
+        let is_ref = match arg {
+            syn::FnArg::Typed(p) => matches!(&*p.ty, syn::Type::Reference(_)),
+            syn::FnArg::Receiver(p) => p.reference.is_some(),
+        };
+        assert!(is_ref, "arg: {:?} must be a reference", arg.to_token_stream().to_string());
+    });
+
     let return_type = dereference_type(return_type);
     item_fn.block.stmts.insert(
         0,
