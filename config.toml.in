@@ -1,0 +1,11 @@
+[build]
+
+rustflags = [
+  "-C", "lto=fat", "-C", "embed-bitcode=yes", "-Zdylib-lto",
+  "-C", "link-arg=-fuse-ld=lld",
+  "-C", "linker-plugin-lto",
+  "-C", "link-arg=-Xlinker",
+  "-C", "link-arg=--load-pass-plugin=/workdir/build/lib/LLVMCfip.so",
+  "-C", "link-arg=-Xlinker",
+  "-C", "link-arg=--lto-newpm-passes=function(reg2mem),cfip<harden-all;only-on-fullLTO>",
+]

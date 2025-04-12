@@ -101,7 +101,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
   }
   if (auto branch_inst = dyn_cast<llvm::BranchInst>(instruction)) {
     if (branch_inst->isConditional()) {
-      errs() << "Hardening" << *instruction << '\n';
+      errs() << "Adding redundancy to: " << *instruction << "\n";
       /*
  // before :
 if (cond)
@@ -576,36 +576,32 @@ Expected<CfipOpts> parseCfipOpts(StringRef Params) {
 } // namespace
 
 llvm::PassPluginLibraryInfo getCfipPluginInfo() {
-  return {
-      LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
-      [](PassBuilder &PB) {
-        PB.registerPipelineParsingCallback(
-            [](StringRef Name, ModulePassManager &MPM,
-               ArrayRef<PassBuilder::PipelineElement>) {
-              if (PassBuilder::checkParametrizedPassName(Name, "cfip")) {
-                auto Params = PassBuilder::parsePassParameters(parseCfipOpts,
-                                                               Name, "cfip");
-                if (!Params) {
-                  errs() << Params.takeError();
-                  exit(EXIT_FAILURE);
-                }
-                // Get rid of PHI nodes in case where we have branches to harden
-                MPM.addPass(createModuleToFunctionPassAdaptor(RegToMemPass()));
-
-                if (Params->harden_all) {
-                  MPM.addPass(Cfip<harden_all>{Params->atomic_state,
-                                               Params->check_asap,
-                                               Params->only_on_fullLTO});
-                } else {
-                  MPM.addPass(Cfip<harden_chosen>{Params->atomic_state,
-                                                  Params->check_asap,
-                                                  Params->only_on_fullLTO});
-                }
-                return true;
-              }
-              return false;
-            });
-      }};
+  return {LLVM_PLUGIN_API_VERSION, "cfip", LLVM_VERSION_STRING,
+          [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name, ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                  if (PassBuilder::checkParametrizedPassName(Name, "cfip")) {
+                    auto Params = PassBuilder::parsePassParameters(
+                        parseCfipOpts, Name, "cfip");
+                    if (!Params) {
+                      errs() << Params.takeError();
+                      exit(EXIT_FAILURE);
+                    }
+                    if (Params->harden_all) {
+                      MPM.addPass(Cfip<harden_all>{Params->atomic_state,
+                                                   Params->check_asap,
+                                                   Params->only_on_fullLTO});
+                    } else {
+                      MPM.addPass(Cfip<harden_chosen>{Params->atomic_state,
+                                                      Params->check_asap,
+                                                      Params->only_on_fullLTO});
+                    }
+                    return true;
+                  }
+                  return false;
+                });
+          }};
 }
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
