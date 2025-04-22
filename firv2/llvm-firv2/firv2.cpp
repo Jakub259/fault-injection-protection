@@ -1,10 +1,10 @@
-#include <utility>
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include <utility>
 using namespace llvm;
 
 namespace {
@@ -97,6 +97,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
       auto cmp_func =
           cast<Function>(M.getOrInsertFunction(cmp_name, nullptr).getCallee());
 
+      function->replaceAllUsesWith(new_function);
       build_function(new_function, function, cmp_func);
       call->eraseFromParent();
     }

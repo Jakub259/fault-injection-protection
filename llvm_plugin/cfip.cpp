@@ -33,6 +33,14 @@ void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
         toProcess.push_back(user);
       }
     }
+
+    if (auto ci = dyn_cast<CallBase>(currentUser)) {
+      if (ci->getCalledFunction()->getName().starts_with("llvm.memcpy"))
+        toProcess.push_back(ci->getOperand(0));
+    }
+    if (auto st = dyn_cast<StoreInst>(currentUser)) {
+      toProcess.push_back(st->getOperand(1));
+    }
   }
 }
 
@@ -48,7 +56,7 @@ size_t harden_fn_args(Function *function,
                       DenseSet<Function *> *cloned_functions, bool atomic_state,
                       bool check_asap, SmallVector<unsigned> &args);
 
-void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
+bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
                     bool atomic_state, llvm::BasicBlock *error_bb,
                     DenseSet<Value *> *users_of_critical_values = nullptr,
                     DenseSet<Function *> *cloned_functions = nullptr) {
@@ -57,12 +65,13 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
   auto *instruction = dyn_cast<Instruction>(user);
   if (!instruction) {
     /* errs() << "Skipping non-instruction: " << *instruction << "\n"; */
-    return;
+    return false;
   }
 
   if (users_of_critical_values) {
     if (auto *call_inst = dyn_cast<CallBase>(instruction)) {
       SmallVector<unsigned> args{};
+      errs() << "CALL: " << *call_inst << '\n';
       for (unsigned i = 0; i < call_inst->getNumOperands(); i++) {
         auto *operand = call_inst->getOperand(i);
         if (users_of_critical_values->contains(operand)) {
@@ -71,21 +80,20 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       }
       // the call does not use any critical values
       if (args.empty()) {
-        return;
+        return false;
       }
       auto *called_fn = call_inst->getCalledFunction();
       if (called_fn->isDeclaration()) {
         errs() << "Skipping declaration: " << called_fn->getName() << "\n";
-        return;
+        return false;
       }
       // clone the function to harden
-      auto cloned_function_name =
-          called_fn->getName() + makeHardenedFunctionNameSuffix(args);
+      const std::string cloned_function_name =
+          (called_fn->getName() + makeHardenedFunctionNameSuffix(args)).str();
       auto M = called_fn->getParent();
 
       SmallVector<char> small_vec;
-      auto cloned_function =
-          M->getFunction(cloned_function_name.toStringRef(small_vec));
+      auto cloned_function = M->getFunction(cloned_function_name);
       // check if function is already cloned and hardend
       if (!cloned_function) {
         ValueToValueMapTy VMap;
@@ -94,6 +102,9 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
         cloned_functions->insert(cloned_function);
         harden_fn_args(cloned_function, cloned_functions, atomic_state,
                        static_cast<bool>(error_bb), args);
+        cloned_function->setLinkage(GlobalValue::LinkageTypes::PrivateLinkage);
+        errs() << "copied function for hardening: "
+               << cloned_function->getName().str() << '\n';
       }
 
       call_inst->setCalledFunction(cloned_function);
@@ -101,7 +112,7 @@ void add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
   }
   if (auto branch_inst = dyn_cast<llvm::BranchInst>(instruction)) {
     if (branch_inst->isConditional()) {
-      errs() << "Adding redundancy to: " << *instruction << "\n";
+      errs() << "BR: " << *instruction << "\n";
       /*
  // before :
 if (cond)
@@ -186,7 +197,7 @@ else
       }
     }
 
-    return;
+    return true;
   }
 
   Value *local_fault_detected{0};
@@ -207,9 +218,9 @@ else
         inst_Ty->isIntOrIntVectorTy() || inst_Ty->isPtrOrPtrVectorTy();
 
     if (not is_supported_by_cmp)
-      return;
+      return false;
 
-    errs() << "Adding redundancy to: " << *instruction << "\n";
+    errs() << "INST: " << *instruction << "\n";
 
     for (unsigned int i = 0; i < instruction->getNumOperands(); i++) {
       // "Undef values aren't exactly constants; if they have multiple uses,
@@ -248,7 +259,7 @@ else
     instruction->eraseFromParent();
   }
   if (!local_fault_detected)
-    return;
+    return false;
 
   // finalize
   Instruction *block_split_point, *state;
@@ -283,6 +294,7 @@ else
         MDBuilder(state->getContext()).createBranchWeights(1, 2000));
     old_terminator->eraseFromParent();
   }
+  return true;
 }
 
 SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
@@ -399,12 +411,14 @@ size_t harden_fn_args(Function *function,
 
   auto *error_bb = insert_error_bb(*function);
 
+  bool modified = false;
   for (auto *user : users_of_critical_values) {
-    add_redundancy(fault_detected_ptr, user, atomic_state,
-                   check_asap ? error_bb : nullptr, &users_of_critical_values,
-                   cloned_functions);
+    modified |= add_redundancy(fault_detected_ptr, user, atomic_state,
+                               check_asap ? error_bb : nullptr,
+                               &users_of_critical_values, cloned_functions);
   }
-  add_integrity_check(*function, fault_detected_ptr, atomic_state, error_bb);
+  if (modified)
+    add_integrity_check(*function, fault_detected_ptr, atomic_state, error_bb);
 
   return 1;
 }
@@ -444,12 +458,14 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
 
   auto *error_bb = insert_error_bb(function);
 
+  bool modified = false;
   for (auto *user : users_of_critical_values) {
-    add_redundancy(fault_detected_ptr, user, atomic_state,
-                   check_asap ? error_bb : nullptr, &users_of_critical_values,
-                   cloned_functions);
+    modified |= add_redundancy(fault_detected_ptr, user, atomic_state,
+                               check_asap ? error_bb : nullptr,
+                               &users_of_critical_values, cloned_functions);
   }
-  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
+  if (modified)
+    add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   return opaque_calls.size();
 }
@@ -471,6 +487,18 @@ void finalize(Function &F, FunctionAnalysisManager &AM) {
   F.removeFnAttr(Attribute::AlwaysInline);
 }
 
+// only a heuristic
+bool isLTOPhase(const Module &M) {
+  unsigned compileUnitCount = 0;
+
+  if (auto *CUs = M.getNamedMetadata("llvm.dbg.cu")) {
+    compileUnitCount = CUs->getNumOperands();
+    errs() << "Found " << compileUnitCount << " compile units\n";
+  }
+
+  return compileUnitCount > 1 || M.getModuleFlag("PIE Level");
+}
+
 template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   const bool atomic_state;
   const bool check_asap;
@@ -481,9 +509,10 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
         only_on_fullLTO{only_on_fullLTO_} {}
 
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
+    errs() << "LTO " << isLTOPhase(M) << "\n";
     if (only_on_fullLTO) {
       // it appears that rustc only add this ModuleFlag when it's linking
-      if (not M.getModuleFlag("PIE Level"))
+      if (not isLTOPhase(M))
         return PreservedAnalyses::all();
     }
 
@@ -533,15 +562,17 @@ size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
     instructions.push_back(&*inst);
   }
 
+  bool modified = false;
   for (auto *i : instructions) {
     if (i) {
       // we are hardening everything we can in each function
       // thus we do not need to recurse into function calls
-      add_redundancy(fault_detected_ptr, i, atomic_state,
-                     check_asap ? error_bb : nullptr);
+      modified |= add_redundancy(fault_detected_ptr, i, atomic_state,
+                                 check_asap ? error_bb : nullptr);
     }
   }
-  add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
+  if (modified)
+    add_integrity_check(function, fault_detected_ptr, atomic_state, error_bb);
 
   return 1;
 }
