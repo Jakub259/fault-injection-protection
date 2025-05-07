@@ -20,9 +20,9 @@ using namespace llvm;
 
 namespace {
 
-void getUsersRec(Value *const U, DenseSet<Value *> &OutSV) {
+void getUsersRec(Value *const User, DenseSet<Value *> &OutSV) {
   std::vector<Value *> toProcess;
-  toProcess.push_back(U);
+  toProcess.push_back(User);
 
   while (!toProcess.empty()) {
     Value *currentUser = toProcess.back();
