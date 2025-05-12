@@ -34,11 +34,11 @@ void getUsersRec(Value *const User, DenseSet<Value *> &OutSV) {
       }
     }
 
-    if (auto ci = dyn_cast<CallBase>(currentUser)) {
+    if (const auto *ci = dyn_cast<CallBase>(currentUser)) {
       if (ci->getCalledFunction()->getName().starts_with("llvm.memcpy"))
         toProcess.push_back(ci->getOperand(0));
     }
-    if (auto st = dyn_cast<StoreInst>(currentUser)) {
+    if (const auto *st = dyn_cast<StoreInst>(currentUser)) {
       toProcess.push_back(st->getOperand(1));
     }
   }
@@ -70,8 +70,13 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
 
   if (users_of_critical_values) {
     if (auto *call_inst = dyn_cast<CallBase>(instruction)) {
-      SmallVector<unsigned> args{};
       errs() << "CALL: " << *call_inst << '\n';
+      auto *called_fn = call_inst->getCalledFunction();
+      if (called_fn->isDeclaration()) {
+        errs() << "Skipping declaration: " << called_fn->getName() << "\n";
+        return false;
+      }
+      SmallVector<unsigned> args{};
       for (unsigned i = 0; i < call_inst->getNumOperands(); i++) {
         auto *operand = call_inst->getOperand(i);
         if (users_of_critical_values->contains(operand)) {
@@ -82,11 +87,7 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       if (args.empty()) {
         return false;
       }
-      auto *called_fn = call_inst->getCalledFunction();
-      if (called_fn->isDeclaration()) {
-        errs() << "Skipping declaration: " << called_fn->getName() << "\n";
-        return false;
-      }
+
       // clone the function to harden
       const std::string cloned_function_name =
           (called_fn->getName() + makeHardenedFunctionNameSuffix(args)).str();
@@ -214,7 +215,7 @@ else
 
     const auto *inst_Ty = instruction->getType();
 
-    bool is_supported_by_cmp =
+    const bool is_supported_by_cmp =
         inst_Ty->isIntOrIntVectorTy() || inst_Ty->isPtrOrPtrVectorTy();
 
     if (not is_supported_by_cmp)
@@ -256,6 +257,12 @@ else
 
     // TODO: Does it matter if we replace it with tmp1 or tmp2 or pick random?
     instruction->replaceAllUsesWith(tmp1);
+    if (users_of_critical_values) {
+      // Update the tracked values set to include the new instruction (tmp1)
+      // and remove the old instruction that was replaced
+      users_of_critical_values->erase(instruction);
+      users_of_critical_values->insert(tmp1);
+    }
     instruction->eraseFromParent();
   }
   if (!local_fault_detected)
@@ -378,7 +385,7 @@ llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
 
 llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
 
-  llvm::Type *i8_type = llvm::IntegerType::getInt8Ty(Ctx);
+  auto *i8_type = llvm::IntegerType::getInt8Ty(Ctx);
 
   // create value to store state of program
   llvm::Instruction *fault_detected_ptr =
@@ -399,10 +406,10 @@ size_t harden_fn_args(Function *function,
   // it should point to begin of entry block
   llvm::IRBuilder<> alloca_builder(&function->getEntryBlock().front());
 
-  auto fault_detected_ptr = insert_bool(alloca_builder, Ctx);
+  auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
   DenseSet<Value *> users_of_critical_values;
-  for (auto &arg : args) {
+  for (const auto &arg : args) {
     getUsersRec(function->getArg(arg), users_of_critical_values);
   }
   if (users_of_critical_values.empty()) {
@@ -438,7 +445,7 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
   // it should point to begin of entry block
   llvm::IRBuilder<> alloca_builder(&function.getEntryBlock().front());
 
-  auto fault_detected_ptr = insert_bool(alloca_builder, Ctx);
+  auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
   DenseSet<Value *> users_of_critical_values;
   for (auto &opaque_call : opaque_calls) {
