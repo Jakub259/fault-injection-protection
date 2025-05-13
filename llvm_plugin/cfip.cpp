@@ -34,11 +34,11 @@ void getUsersRec(Value *const User, DenseSet<Value *> &OutSV) {
       }
     }
 
-    if (const auto *ci = dyn_cast<CallBase>(currentUser)) {
+    if (auto ci = dyn_cast<CallBase>(currentUser)) {
       if (ci->getCalledFunction()->getName().starts_with("llvm.memcpy"))
         toProcess.push_back(ci->getOperand(0));
     }
-    if (const auto *st = dyn_cast<StoreInst>(currentUser)) {
+    if (auto st = dyn_cast<StoreInst>(currentUser)) {
       toProcess.push_back(st->getOperand(1));
     }
   }
@@ -77,6 +77,7 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
         return false;
       }
       SmallVector<unsigned> args{};
+
       for (unsigned i = 0; i < call_inst->getNumOperands(); i++) {
         auto *operand = call_inst->getOperand(i);
         if (users_of_critical_values->contains(operand)) {
@@ -87,7 +88,7 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       if (args.empty()) {
         return false;
       }
-
+      
       // clone the function to harden
       const std::string cloned_function_name =
           (called_fn->getName() + makeHardenedFunctionNameSuffix(args)).str();
@@ -217,8 +218,11 @@ else
 
     const bool is_supported_by_cmp =
         inst_Ty->isIntOrIntVectorTy() || inst_Ty->isPtrOrPtrVectorTy();
+    const bool is_supported_by_fcmp = inst_Ty->isFPOrFPVectorTy();
 
-    if (not is_supported_by_cmp)
+    const bool supported = is_supported_by_cmp || is_supported_by_fcmp;
+
+    if (not supported)
       return false;
 
     errs() << "INST: " << *instruction << "\n";
@@ -244,9 +248,14 @@ else
     builder.Insert(tmp2);
 
     // tmp1 != tmp2
-    local_fault_detected =
-        builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
-
+    if (is_supported_by_cmp) {
+      local_fault_detected =
+          builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
+    } else if (is_supported_by_fcmp) {
+      local_fault_detected = builder.CreateFCmpONE(tmp1, tmp2, "is_fault_detected");
+    } else {
+      assert(0 && "unsupported op");
+    }
     // if it's vector we need to reduce it to scalar
     if (inst_Ty->isVectorTy()) {
       local_fault_detected = builder.CreateOrReduce(local_fault_detected);
