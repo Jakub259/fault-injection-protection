@@ -4,6 +4,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/IR/Instructions.h"
 #include <utility>
 using namespace llvm;
 
@@ -16,43 +17,92 @@ struct Firv2 : PassInfoMixin<Firv2> {
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
+    
+    // Check if the function has an sret attribute
+    Type *sretType = original_function->getParamStructRetType(0);
+    
     SmallVector<Value *> args_vec;
-    for (auto &arg : original_function->args()) {
+    for (auto &arg : function->args()) {
       args_vec.push_back(&arg);
     }
+    
+    if (sretType) {
+      // For sret functions, we pass the original sret pointer to the first call
+      // and only create a temporary alloca for the second call
+      Value *sretAlloca2 = builder.CreateAlloca(sretType);
+      
+      SmallVector<Value *> args_vec_temp(args_vec);
+      
+      // Replace the sret argument for the second call with our temporary alloca
+      args_vec_temp[0] = sretAlloca2;
+      
+      auto call1 = builder.CreateCall(original_function, args_vec);
+      call1->setCallingConv(original_function->getCallingConv());
+      
+      auto call2 = builder.CreateCall(original_function, args_vec_temp);
+      call2->setCallingConv(original_function->getCallingConv());
+      
+      auto cmp = builder.CreateCall(cmp_function, {args_vec[0], sretAlloca2});
+      cmp->setCallingConv(cmp_function->getCallingConv());
+      cmp_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+      cmp_function->addFnAttr(Attribute::InlineHint);
+      
+      BasicBlock *return_block =
+          BasicBlock::Create(function->getContext(), "return", function);
+      BasicBlock *error_block =
+          BasicBlock::Create(function->getContext(), "error", function);
+      
+      builder.CreateCondBr(cmp, return_block, error_block,
+                           MDBuilder(Ctx).createBranchWeights(1, 2000));
+      
+      IRBuilder<> return_builder(return_block);
+      return_builder.CreateRetVoid();
+      
+      IRBuilder<> error_builder(error_block);
+      error_builder.CreateCall(
+          Intrinsic::getDeclaration(function->getParent(), Intrinsic::trap));
+      error_builder.CreateUnreachable();
+    } else {
+      SmallVector<Value *> args_vec;
+      for (auto &arg : original_function->args()) {
+        args_vec.push_back(&arg);
+      }
 
-    auto return_type = original_function->getReturnType();
-    auto stack_var_1 = builder.CreateAlloca(return_type);
-    auto stack_var_2 = builder.CreateAlloca(return_type);
+      auto return_type = original_function->getType();
 
-    auto call1 = builder.CreateCall(original_function, {args_vec});
-    call1->setCallingConv(original_function->getCallingConv());
+      auto return_var_1 = builder.CreateAlloca(return_type);
+      auto return_var_2 = builder.CreateAlloca(return_type);
 
-    auto call2 = call1->clone();
-    call2->insertAfter(call1);
+      auto call1 = builder.CreateCall(original_function, args_vec);
+      call1->setCallingConv(original_function->getCallingConv());
 
-    builder.CreateStore(call1, stack_var_1);
-    builder.CreateStore(call2, stack_var_2);
-    auto cmp = builder.CreateCall(cmp_function, {stack_var_1, stack_var_2});
-    call1->setCallingConv(cmp_function->getCallingConv());
-    cmp_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    cmp_function->addFnAttr(Attribute::InlineHint);
+      auto call2 = builder.CreateCall(original_function, args_vec);
+      call2->setCallingConv(original_function->getCallingConv());
 
-    BasicBlock *return_block =
-        BasicBlock::Create(function->getContext(), "return", function);
-    BasicBlock *error_block =
-        BasicBlock::Create(function->getContext(), "error", function);
+      builder.CreateStore(call1, return_var_1);
+      builder.CreateStore(call2, return_var_2);
 
-    builder.CreateCondBr(cmp, return_block, error_block,
-                         MDBuilder(Ctx).createBranchWeights(1, 2000));
+      auto cmp = builder.CreateCall(cmp_function, {return_var_1, return_var_2});
+      cmp->setCallingConv(cmp_function->getCallingConv());
+      cmp_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+      cmp_function->addFnAttr(Attribute::InlineHint);
 
-    IRBuilder<> return_builder(return_block);
-    return_builder.CreateRet(call1);
+      BasicBlock *return_block =
+          BasicBlock::Create(function->getContext(), "return", function);
+      BasicBlock *error_block =
+          BasicBlock::Create(function->getContext(), "error", function);
 
-    IRBuilder<> error_builder(error_block);
-    error_builder.CreateCall(
-        Intrinsic::getDeclaration(function->getParent(), Intrinsic::trap));
-    error_builder.CreateUnreachable();
+      builder.CreateCondBr(cmp, return_block, error_block,
+                           MDBuilder(Ctx).createBranchWeights(1, 2000));
+
+      IRBuilder<> return_builder(return_block);
+      return_builder.CreateRet(call1);
+
+      IRBuilder<> error_builder(error_block);
+      error_builder.CreateCall(
+          Intrinsic::getDeclaration(function->getParent(), Intrinsic::trap));
+      error_builder.CreateUnreachable();
+    }
   }
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
     SmallVector<std::pair<Value *, StringRef>> hardening_requests;
