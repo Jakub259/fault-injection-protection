@@ -21,9 +21,17 @@ struct Firv2 : PassInfoMixin<Firv2> {
     IRBuilder<> builder(block);
 
     // Check if the function has an sret attribute
-    // opt says 0 is the only legal position for sret
-    Type *sretType = original_function->getParamStructRetType(0);
-
+    // opt says:
+    // * Cannot have multiple 'sret' parameters!
+    // * Attribute 'sret' is not on first or second parameter!
+    Type *sretType;
+    unsigned sretPos;
+    for (auto i : {0u, 1u}) {
+      if ((sretType = original_function->getParamStructRetType(i))) {
+        sretPos = i;
+        break;
+      }
+    }
     SmallVector<Value *> args_vec;
     for (auto &arg : function->args()) {
       args_vec.push_back(&arg);
@@ -39,7 +47,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
       SmallVector<Value *> args_vec_temp(args_vec);
 
       // Replace the sret argument for the second call with our temporary alloca
-      args_vec_temp[0] = sretAlloca2;
+      args_vec_temp[sretPos] = sretAlloca2;
 
       auto call1 = builder.CreateCall(original_function, args_vec);
       call1->setCallingConv(original_function->getCallingConv());
@@ -47,7 +55,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
       auto call2 = builder.CreateCall(original_function, args_vec_temp);
       call2->setCallingConv(original_function->getCallingConv());
 
-      cmp = builder.CreateCall(cmp_function, {args_vec[0], sretAlloca2});
+      cmp = builder.CreateCall(cmp_function, {args_vec[sretPos], sretAlloca2});
       cmp->setCallingConv(cmp_function->getCallingConv());
       return_value = call1;
     } else {
