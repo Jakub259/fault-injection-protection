@@ -3,11 +3,13 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
-#include <llvm/IR/Type.h>
-#include <llvm/IR/Value.h>
+#include <limits>
 #include <utility>
+
 using namespace llvm;
 
 namespace {
@@ -25,7 +27,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
     // * Cannot have multiple 'sret' parameters!
     // * Attribute 'sret' is not on first or second parameter!
     Type *sretType;
-    unsigned sretPos;
+    unsigned sretPos = std::numeric_limits<unsigned>::max();
     for (auto i : {0u, 1u}) {
       if ((sretType = original_function->getParamStructRetType(i))) {
         sretPos = i;
@@ -49,10 +51,10 @@ struct Firv2 : PassInfoMixin<Firv2> {
       // Replace the sret argument for the second call with our temporary alloca
       args_vec_temp[sretPos] = sretAlloca2;
 
-      auto call1 = builder.CreateCall(original_function, args_vec);
+      auto *call1 = builder.CreateCall(original_function, args_vec);
       call1->setCallingConv(original_function->getCallingConv());
 
-      auto call2 = builder.CreateCall(original_function, args_vec_temp);
+      auto *call2 = builder.CreateCall(original_function, args_vec_temp);
       call2->setCallingConv(original_function->getCallingConv());
 
       cmp = builder.CreateCall(cmp_function, {args_vec[sretPos], sretAlloca2});
@@ -64,15 +66,15 @@ struct Firv2 : PassInfoMixin<Firv2> {
         args_vec.push_back(&arg);
       }
 
-      auto return_type = original_function->getType();
+      auto *return_type = original_function->getType();
 
-      auto return_var_1 = builder.CreateAlloca(return_type);
-      auto return_var_2 = builder.CreateAlloca(return_type);
+      auto *return_var_1 = builder.CreateAlloca(return_type);
+      auto *return_var_2 = builder.CreateAlloca(return_type);
 
-      auto call1 = builder.CreateCall(original_function, args_vec);
+      auto *call1 = builder.CreateCall(original_function, args_vec);
       call1->setCallingConv(original_function->getCallingConv());
 
-      auto call2 = builder.CreateCall(original_function, args_vec);
+      auto *call2 = builder.CreateCall(original_function, args_vec);
       call2->setCallingConv(original_function->getCallingConv());
 
       builder.CreateStore(call1, return_var_1);
@@ -114,8 +116,8 @@ struct Firv2 : PassInfoMixin<Firv2> {
       }
       for (auto &bb : function) {
         for (auto &inst : bb)
-          if (auto call = dyn_cast<CallBase>(&inst)) {
-            if (auto called_function = call->getCalledFunction()) {
+          if (auto *call = dyn_cast<CallBase>(&inst)) {
+            if (auto *called_function = call->getCalledFunction()) {
               {
                 auto called_name = called_function->getName();
                 if (called_name.consume_front("internal_firv2_") and
@@ -130,14 +132,14 @@ struct Firv2 : PassInfoMixin<Firv2> {
       }
     }
     for (auto &[hardening_request, IDX] : hardening_requests) {
-      auto call = cast<CallBase>(hardening_request);
-      auto function = call->getCaller();
+      auto *call = cast<CallBase>(hardening_request);
+      auto *function = call->getCaller();
       auto original_name = function->getName();
       if (function->getType()->isVoidTy()) {
         errs() << "Skipping void function " << original_name << "\n";
         continue;
       }
-      auto new_name = "original." + original_name;
+      auto new_name = (original_name + ".original");
       function->setName(new_name);
       auto new_function = cast<Function>(
           M.getOrInsertFunction(original_name, function->getFunctionType())
