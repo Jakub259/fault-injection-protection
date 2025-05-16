@@ -5,6 +5,13 @@
 
 
 target triple = "x86_64-redhat-linux-gnu"
+; CHECK-LABEL: foo
+define void @foo() {
+  ; CHECK: call i32 @main()
+  call i32 @main()
+  ret void
+}
+
 declare void @internal_firv2_0_identifier()
 
 ; CHECK-LABEL: original.main

@@ -1,10 +1,10 @@
-#include <utility>
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include <utility>
 using namespace llvm;
 
 namespace {
@@ -14,7 +14,6 @@ struct Firv2 : PassInfoMixin<Firv2> {
                       Function *cmp_function) {
     LLVMContext &Ctx = function->getContext();
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    original_function->addFnAttr(Attribute::InlineHint);
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
     SmallVector<Value *> args_vec;
@@ -94,9 +93,9 @@ struct Firv2 : PassInfoMixin<Firv2> {
               .getCallee());
 
       auto cmp_name = ("internal_firv2_" + IDX + "_eq").str();
-      auto cmp_func =
-          cast<Function>(M.getOrInsertFunction(cmp_name, nullptr).getCallee());
+      auto cmp_func = cast<Function>(M.getFunction(cmp_name));
 
+      function->replaceAllUsesWith(new_function);
       build_function(new_function, function, cmp_func);
       call->eraseFromParent();
     }
@@ -111,7 +110,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
 };
 } // namespace
 
-llvm::PassPluginLibraryInfo getCfipPluginInfo() {
+llvm::PassPluginLibraryInfo getFirv2PluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "firv2", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
@@ -127,5 +126,5 @@ llvm::PassPluginLibraryInfo getCfipPluginInfo() {
 }
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
-  return getCfipPluginInfo();
+  return getFirv2PluginInfo();
 }
