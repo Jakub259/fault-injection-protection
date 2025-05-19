@@ -1,4 +1,6 @@
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/MDBuilder.h"
@@ -146,7 +148,14 @@ struct Firv2 : PassInfoMixin<Firv2> {
               .getCallee());
 
       auto cmp_name = ("internal_firv2_" + IDX + "_eq").str();
-      auto cmp_func = cast<Function>(M.getFunction(cmp_name));
+      Function *cmp_func;
+      if ((cmp_func = M.getFunction(cmp_name))) {
+      } else if (GlobalAlias *alias = M.getNamedAlias(cmp_name)) {
+        cmp_func = dyn_cast<Function>(alias->getAliaseeObject());
+      } else {
+        errs() << "cmp function not found: " << cmp_name << "\n";
+        exit(EXIT_FAILURE);
+      }
 
       function->replaceAllUsesWith(new_function);
       build_function(new_function, function, cmp_func);
