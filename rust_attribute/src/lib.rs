@@ -42,7 +42,7 @@ fn harden_init(stmt_init: &mut syn::LocalInit) {
     let new_init = stmt_init.expr.to_token_stream();
     let function_name = syn::Ident::new(
         format!(
-            "internal_cfip_opaque_call_{}",
+            "cfip_harden_var_{}",
             IDX.fetch_add(1, atomic::Ordering::SeqCst)
         )
         .as_str(),
@@ -56,7 +56,7 @@ fn harden_init(stmt_init: &mut syn::LocalInit) {
                     {
                         #[inline(never)]
                         #[unsafe(no_mangle)]
-                        fn #function_name<T>(dummy: T) -> T {
+                        pub fn #function_name<T>(dummy: T) -> T {
                             use core::hint::black_box;
                             return black_box(dummy);
                         }

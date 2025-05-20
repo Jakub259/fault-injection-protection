@@ -319,7 +319,7 @@ SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
     for (auto &instruction : basic_block) {
       if (auto *call = dyn_cast<CallInst>(&instruction)) {
         if (auto *called_op = call->getCalledOperand()) {
-          if (called_op->getName().starts_with("internal_cfip_opaque_call_"))
+          if (called_op->getName().starts_with("cfip_harden_var_"))
             opaque_calls.push_back(&instruction);
         }
       }
