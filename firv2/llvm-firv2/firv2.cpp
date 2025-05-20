@@ -9,6 +9,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include <limits>
 #include <utility>
 
@@ -20,6 +21,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
   void build_function(Function *function, Function *original_function,
                       Function *cmp_function) {
     LLVMContext &Ctx = function->getContext();
+    function->addFnAttr(Attribute::AlwaysInline);
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
@@ -87,7 +89,6 @@ struct Firv2 : PassInfoMixin<Firv2> {
       return_value = call1;
     }
     cmp_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    cmp_function->addFnAttr(Attribute::InlineHint);
 
     BasicBlock *return_block =
         BasicBlock::Create(function->getContext(), "return", function);
@@ -180,6 +181,11 @@ llvm::PassPluginLibraryInfo getFirv2PluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "firv2") {
                     MPM.addPass(Firv2{});
+                    return true;
+                  }
+                  if (Name == "firv2-always-inliner") {
+                    MPM.addPass(Firv2{});
+                    MPM.addPass(AlwaysInlinerPass());
                     return true;
                   }
                   return false;
