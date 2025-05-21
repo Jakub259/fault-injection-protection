@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::atomic;
 
-use proc_macro::{ Span, TokenStream};
+use proc_macro::{Span, TokenStream};
 use quote::ToTokens;
 use syn::visit_mut::{self, VisitMut};
 
@@ -38,7 +38,7 @@ fn read_from_attr(attrs: TokenStream) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-fn harden_init(stmt_init: &mut syn::LocalInit) {
+fn harden_init(stmt_init: &mut syn::LocalInit, ty: &Box<syn::Type>) {
     let new_init = stmt_init.expr.to_token_stream();
     let function_name = syn::Ident::new(
         format!(
@@ -54,13 +54,12 @@ fn harden_init(stmt_init: &mut syn::LocalInit) {
             syn::parse(
                 quote::quote! {
                     {
-                        #[inline(never)]
-                        #[unsafe(no_mangle)]
-                        pub fn #function_name<T>(dummy: T) -> T {
-                            use core::hint::black_box;
-                            return black_box(dummy);
+                        unsafe extern "C" {
+                            // this function does not actually exist
+                            #[allow(improper_ctypes)]
+                            fn #function_name(dummy: #ty) -> #ty;
                         }
-                        #function_name(#new_init)
+                        unsafe { #function_name( #new_init ) }
                     }
                 }
                 .into(),
@@ -72,7 +71,11 @@ fn harden_init(stmt_init: &mut syn::LocalInit) {
 }
 impl VisitMut for HardenVariable {
     fn visit_local_mut(&mut self, stmt: &mut syn::Local) {
-        let syn::Pat::Ident(ref pattern) = stmt.pat else {
+        let (pat, ty) = match &stmt.pat {
+            syn::Pat::Type(syn::PatType { pat, ty, .. }) => (pat, ty),
+            _ => return,
+        };
+        let syn::Pat::Ident(ref pattern) = &**pat else {
             return;
         };
         let harden_var_name = if self.requested.contains(&pattern.ident.to_string()) {
@@ -89,7 +92,7 @@ impl VisitMut for HardenVariable {
             );
         };
 
-        harden_init(original_init);
+        harden_init(original_init, ty);
 
         visit_mut::visit_local_mut(self, stmt);
     }

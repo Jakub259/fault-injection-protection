@@ -63,7 +63,7 @@ define dso_local i32 @main() {
   ret i32 %sum
 }
 
-; CHECK: define void @create_point(ptr %0, i32 %1, i32 %2) {
+; CHECK: define void @create_point(ptr %0, i32 %1, i32 %2)
 ; CHECK-LABEL: entry:
   ; CHECK-NEXT: %3 = alloca %struct.Point, align 8
   ; CHECK-NEXT: call void @create_point.original(ptr %0, i32 %1, i32 %2)
