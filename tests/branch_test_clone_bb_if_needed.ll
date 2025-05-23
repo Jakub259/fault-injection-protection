@@ -9,7 +9,7 @@ define i32 @main(i1 %0) #0 {
 ; CHECK: br i1 %0, label %true1, label %true0.clone
   br i1 %0, label %true1, label %true0
 
-; CHECK-LABEL
+; CHECK-LABEL: true0:
 true0:
   ; CHECK: trunc
   ; CHECK: br i1
