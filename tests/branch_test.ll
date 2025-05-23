@@ -7,7 +7,7 @@
 ; CHECK-LABEL: main
 define i32 @main(i1 %0) {
   ; CHECK: %unexpected_result = sub i1 false, %0
-  ; CHECK-NEXT br i1 %0
+  ; CHECK-NEXT: br i1 %0
   br i1 %0, label %true, label %false
 
 ; CHECK-LABEL: false:

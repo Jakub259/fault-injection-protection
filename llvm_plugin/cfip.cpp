@@ -116,7 +116,7 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
     if (branch_inst->isConditional()) {
       errs() << "BR: " << *instruction << "\n";
       /*
- // before :
+// before :
 if (cond)
 {
   <true case>
@@ -126,7 +126,7 @@ else
   <false case>
 }
 // after:
-chosen_case = 0
+chosen_case = !cond
 if (cond)
 {
   local_fault_detected = chosen_case != true
