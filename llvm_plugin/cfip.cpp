@@ -427,8 +427,11 @@ size_t harden_fn_args(Function *function,
 
   auto *error_bb = insert_error_bb(*function);
 
+  std::vector worklist(users_of_critical_values.begin(),
+                       users_of_critical_values.end());
+
   bool modified = false;
-  for (auto *user : users_of_critical_values) {
+  for (auto *user : worklist) {
     modified |= add_redundancy(fault_detected_ptr, user, atomic_state,
                                check_asap ? error_bb : nullptr,
                                &users_of_critical_values, cloned_functions);
