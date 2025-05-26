@@ -11,7 +11,6 @@
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Transforms/Scalar/DCE.h"
-#include "llvm/Transforms/Scalar/Reg2Mem.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
@@ -252,7 +251,8 @@ else
       local_fault_detected =
           builder.CreateICmpNE(tmp1, tmp2, "is_fault_detected");
     } else if (is_supported_by_fcmp) {
-      local_fault_detected = builder.CreateFCmpONE(tmp1, tmp2, "is_fault_detected");
+      local_fault_detected =
+          builder.CreateFCmpONE(tmp1, tmp2, "is_fault_detected");
     } else {
       assert(0 && "unsupported op");
     }

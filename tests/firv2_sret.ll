@@ -1,4 +1,4 @@
-; RUN: opt -passes='firv2' -load-pass-plugin=../build/lib/LLVMFirv2.so %s -S -o %t.ll
+; RUN: opt -passes='firv2-internal' -load-pass-plugin=../build/lib/LLVMFirv2.so %s -S -o %t.ll
 ; RUN: clang %t.ll -o %t.out
 ; RUN: %t.out
 ; RUN: cat %t.ll | FileCheck %s
@@ -49,7 +49,7 @@ start:
 define dso_local i32 @main() {
   ; CHECK: %point = alloca %struct.Point, align 4
   %point = alloca %struct.Point, align 4
-  ; CHECK-NEXT: call void @create_point(ptr %point, i32 10, i32 -10)
+  ; CHECK: call void @create_point(ptr %point, i32 10, i32 -10)
   call void @create_point(ptr %point, i32 10, i32 -10)
   ; CHECK-NEXT: %point_struct = load %struct.Point, ptr %point, align 4
   %point_struct = load %struct.Point, ptr %point, align 4
@@ -65,11 +65,15 @@ define dso_local i32 @main() {
 
 ; CHECK: define void @create_point(ptr %0, i32 %1, i32 %2)
 ; CHECK-LABEL: entry:
-  ; CHECK-NEXT: %3 = alloca %struct.Point, align 8
+  ; CHECK-NEXT: %comparison_result = alloca i1
+  ; CHECK-NEXT: store volatile i1 false, ptr %comparison_result
+  ; CHECK-NEXT: %3 = alloca %struct.Point
   ; CHECK-NEXT: call void @create_point.original(ptr %0, i32 %1, i32 %2)
   ; CHECK-NEXT: call void @create_point.original(ptr %3, i32 %1, i32 %2)
   ; CHECK-NEXT: %4 = call i1 @internal_firv2_0_eq(ptr %0, ptr %3)
-  ; CHECK-NEXT: br i1 %4, label %return, label %error, !prof !0
+  ; CHECK-NEXT: store volatile i1 %4, ptr %comparison_result
+  ; CHECK-NEXT: %5 = load volatile i1, ptr %comparison_result
+  ; CHECK-NEXT: br i1 %5, label %return, label %error, !prof !0
 ; CHECK-LABEL: return:                                           ; preds = %entry
   ; CHECK-NEXT: ret void
 

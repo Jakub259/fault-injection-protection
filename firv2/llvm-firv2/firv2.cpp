@@ -1,4 +1,5 @@
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/IRBuilder.h"
@@ -21,11 +22,15 @@ struct Firv2 : PassInfoMixin<Firv2> {
   void build_function(Function *function, Function *original_function,
                       Function *cmp_function) {
     LLVMContext &Ctx = function->getContext();
+    auto *i1_ty = Type::getInt1Ty(Ctx);
     function->addFnAttr(Attribute::AlwaysInline);
     original_function->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
     BasicBlock *block = BasicBlock::Create(Ctx, "entry", function);
     IRBuilder<> builder(block);
-
+    auto *comparison_result =
+        builder.CreateAlloca(i1_ty, nullptr, "comparison_result");
+    builder.CreateStore(ConstantInt::get(i1_ty, false), comparison_result,
+                        true);
     // Check if the function has an sret attribute
     // opt says:
     // * Cannot have multiple 'sret' parameters!
@@ -95,7 +100,9 @@ struct Firv2 : PassInfoMixin<Firv2> {
     BasicBlock *error_block =
         BasicBlock::Create(function->getContext(), "error", function);
 
-    builder.CreateCondBr(cmp, return_block, error_block,
+    builder.CreateStore(cmp, comparison_result, true);
+    auto *cmp_result = builder.CreateLoad(i1_ty, comparison_result, true);
+    builder.CreateCondBr(cmp_result, return_block, error_block,
                          MDBuilder(Ctx).createBranchWeights(1, 2000));
 
     IRBuilder<> return_builder(return_block);
@@ -110,6 +117,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
         Intrinsic::getDeclaration(function->getParent(), Intrinsic::trap));
     error_builder.CreateUnreachable();
   }
+
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
     SmallVector<std::pair<Value *, StringRef>> hardening_requests;
 
@@ -181,11 +189,11 @@ llvm::PassPluginLibraryInfo getFirv2PluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "firv2") {
                     MPM.addPass(Firv2{});
+                    MPM.addPass(AlwaysInlinerPass());
                     return true;
                   }
-                  if (Name == "firv2-always-inliner") {
+                  if (Name == "firv2-internal") {
                     MPM.addPass(Firv2{});
-                    MPM.addPass(AlwaysInlinerPass());
                     return true;
                   }
                   return false;
