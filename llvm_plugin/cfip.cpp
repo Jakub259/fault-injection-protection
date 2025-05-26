@@ -4,12 +4,15 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/AtomicOrdering.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -87,14 +90,14 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
       if (args.empty()) {
         return false;
       }
-      
+
       // clone the function to harden
       const std::string cloned_function_name =
           (called_fn->getName() + makeHardenedFunctionNameSuffix(args)).str();
       auto M = called_fn->getParent();
 
       SmallVector<char> small_vec;
-      auto cloned_function = M->getFunction(cloned_function_name);
+      auto *cloned_function = M->getFunction(cloned_function_name);
       // check if function is already cloned and hardend
       if (!cloned_function) {
         ValueToValueMapTy VMap;
@@ -313,14 +316,14 @@ else
   return true;
 }
 
-SmallVector<llvm::Instruction *, 1> find_values_to_harden(Function &function) {
-  SmallVector<llvm::Instruction *, 1> opaque_calls;
+SmallVector<llvm::CallInst *, 1> find_values_to_harden(Function &function) {
+  SmallVector<llvm::CallInst *, 1> opaque_calls;
   for (auto &basic_block : function)
     for (auto &instruction : basic_block) {
-      if (auto *call = dyn_cast<CallInst>(&instruction)) {
+      if (auto call = dyn_cast<CallInst>(&instruction)) {
         if (auto *called_op = call->getCalledOperand()) {
           if (called_op->getName().starts_with("cfip_harden_var_"))
-            opaque_calls.push_back(&instruction);
+            opaque_calls.push_back(call);
         }
       }
     }
@@ -370,26 +373,36 @@ void add_integrity_check(Function &function, Instruction *fault_detected_ptr,
     ret_bb->getTerminator()->eraseFromParent();
   }
 }
-llvm::Instruction *unwrap_call(llvm::Instruction *opaque_call,
-                               IRBuilder<> &alloca_builder) {
+llvm::Value *unwrap_call(llvm::CallInst *opaque_call,
+                         IRBuilder<> &alloca_builder) {
+  llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
+
   // rustc attribute hides value behind a call to prevent over-optimizations
   // it's no longer needed thus we unwrap them:
   // before: critical_var = opaque_call(start_value)
   // after: critical_var = start_value
-  llvm::IRBuilder<> value_unwrapper_builder(opaque_call);
+  auto *called_function = opaque_call->getCalledFunction();
 
-  auto *opaque_value_ptr = alloca_builder.CreateAlloca(
-      opaque_call->getType(), nullptr, "unwrapped_value");
-  [[maybe_unused]] auto store_critical_value =
-      value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
-                                          opaque_value_ptr);
+  if (called_function->hasStructRetAttr()) {
+    auto *sret_arg = opaque_call->getArgOperand(0);
+    auto *byvalue_arg = opaque_call->getArgOperand(1);
 
-  llvm::LoadInst *critical_value_use = value_unwrapper_builder.CreateLoad(
-      opaque_call->getType(), opaque_value_ptr, false, "replacement");
+    sret_arg->replaceAllUsesWith(byvalue_arg);
+    opaque_call->eraseFromParent();
+    return byvalue_arg;
+  } else {
+    auto *opaque_value_ptr = alloca_builder.CreateAlloca(
+        opaque_call->getType(), nullptr, "unwrapped_value");
+    value_unwrapper_builder.CreateStore(opaque_call->getOperand(0),
+                                        opaque_value_ptr);
 
-  opaque_call->replaceAllUsesWith(critical_value_use);
-  opaque_call->eraseFromParent();
-  return critical_value_use;
+    llvm::LoadInst *critical_value_use = value_unwrapper_builder.CreateLoad(
+        opaque_call->getType(), opaque_value_ptr, false, "replacement");
+
+    opaque_call->replaceAllUsesWith(critical_value_use);
+    opaque_call->eraseFromParent();
+    return critical_value_use;
+  }
 }
 
 llvm::Instruction *insert_bool(IRBuilder<> &alloca_builder, LLVMContext &Ctx) {
@@ -446,8 +459,8 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
                      bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
 
-  // In 99.9% cases there should be no more than one
-  SmallVector<llvm::Instruction *, 1> opaque_calls =
+  // In 99.999% cases there should be no more than one
+  SmallVector<llvm::CallInst *, 1> opaque_calls =
       find_values_to_harden(function);
 
   if (opaque_calls.empty())
@@ -461,12 +474,11 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
 
   DenseSet<Value *> users_of_critical_values;
   for (auto &opaque_call : opaque_calls) {
-    if (opaque_call->use_empty()) {
+    auto *critical_value_use = unwrap_call(opaque_call, alloca_builder);
+    if (critical_value_use->use_empty()) {
       errs() << "WARNING: nothing to harden, value not used\n";
       continue;
     }
-
-    auto *critical_value_use = unwrap_call(opaque_call, alloca_builder);
 
     getUsersRec(critical_value_use, users_of_critical_values);
   }
