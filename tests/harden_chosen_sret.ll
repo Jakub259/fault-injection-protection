@@ -7,9 +7,6 @@
 ; this test could be improved by not running sroa after cfip
 ; but this would require a change in plugin source code
 
-target triple = "x86_64-redhat-linux-gnu"
-
-declare i32 @llvm.vector.reduce.add.v4i32(<4 x i32> %a)
 declare void @cfip_harden_var_(ptr sret([1 x i32]) %a, ptr byval([1 x i32]) %b)
 
 ; CHECK-LABEL: main
@@ -35,7 +32,3 @@ define dso_local i32 @main() local_unnamed_addr {
 ; CHECK-LABEL: error_handling:
     ; CHECK: unreachable
 }
-
-!llvm.module.flags = !{!0, !1}
-!0 = !{i32 1, !"wchar_size", i32 4}
-!1 = !{i32 7, !"uwtable", i32 2}
