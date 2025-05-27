@@ -1,0 +1,13 @@
+[build]
+
+rustflags = [
+  "-C", "lto=fat",
+  "-Z", "dylib-lto",
+  "-C", "embed-bitcode=yes",
+  "-C", "link-arg=-fuse-ld=lld",
+  "-C", "linker-plugin-lto",
+  "-C", "link-arg=-Xlinker",
+  "-C", "link-arg=--load-pass-plugin=/work/build/lib/LLVMFirv2.so",
+  "-C", "link-arg=-Xlinker",
+  "-C", "link-arg=--lto-newpm-passes=lto<O3>,firv2",
+]

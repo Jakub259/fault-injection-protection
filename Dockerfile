@@ -15,7 +15,7 @@ RUN dnf install -y \
     tar
 
 
-WORKDIR /workdir
+WORKDIR /work
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=1.84.1 -y
 
@@ -29,18 +29,34 @@ RUN mkdir build && \
     cmake --build . && \
     cd ..
 
-# BUILD rust macro
+# LLVM tests
+RUN lit tests -v
+
+# BUILD rust cfip macro
 RUN . "$HOME/.cargo/env" && \
     cd rust_attribute && \
     cargo b
 
-# BUILD rust macro
+# BUILD cfip example
 RUN . "$HOME/.cargo/env" && \
-    cd firv2/rust-firv2 && \
-    cargo b
+    cd examples/cfip_example && \
+    cargo r -- 1 2 3 && \
+    cargo t && \
+    cargo r -r -- 1 2 3 && \
+    cargo t -r
 
-# LLVM tests
-RUN lit tests -v
+# BUILD rust firv2 macro
+RUN . "$HOME/.cargo/env" && \
+cd firv2/rust-firv2 && \
+cargo b
+
+# BUILD firv2 example
+RUN . "$HOME/.cargo/env" && \
+    cd examples/firv2_example && \
+    cargo r -- 1 2 3 && \
+    cargo t && \
+    cargo r -r -- 1 2 3 && \
+    cargo t -r
 
 # test ripgrep
 RUN curl -OL https://github.com/BurntSushi/ripgrep/archive/refs/tags/14.1.1.tar.gz && \
