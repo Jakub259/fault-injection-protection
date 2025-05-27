@@ -1,0 +1,8 @@
+[package]
+name = "cfip_example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrayvec = "0.7.6"
+cfip = { version = "0.1.0", path = "../../rust_attribute" }

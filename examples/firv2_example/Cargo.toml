@@ -1,0 +1,10 @@
+[package]
+name = "firv2_example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrayvec = "0.7.6"
+rust-firv2 = { version = "0.1.0", path = "../../firv2/rust-firv2" }
+
+
