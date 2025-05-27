@@ -575,7 +575,7 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   static bool isRequired() { return true; }
 };
 
-size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
+size_t harden_all(Function &function, [[maybe_unused]] DenseSet<Function *> *cloned_functions,
                   bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
   auto inst_cnt = function.getInstructionCount();
