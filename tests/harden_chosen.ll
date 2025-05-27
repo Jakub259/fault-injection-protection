@@ -6,7 +6,7 @@
 
 target triple = "x86_64-redhat-linux-gnu"
 
-declare dso_local i32 @internal_cfip_opaque_call_(i32 noundef) local_unnamed_addr
+declare dso_local i32 @cfip_harden_var_(i32 noundef) local_unnamed_addr
 declare i32 @llvm.vector.reduce.add.v4i32(<4 x i32> %a)
 
 ; original function -> do not modify
@@ -21,9 +21,9 @@ define i32 @add_fn(i32 %0, i32 %1) {
 }
 
 ; CHECK-LABEL: main
-; CHECK-NOT: internal_cfip_opaque_call_
+; CHECK-NOT: cfip_harden_var_
 define dso_local i32 @main() local_unnamed_addr {
-  %val = call i32 @internal_cfip_opaque_call_(i32 noundef 42)
+  %val = call i32 @cfip_harden_var_(i32 noundef 42)
   ; scalar add
   ; CHECK-COUNT-2: add i32 1, 42 
   %s1 = add i32 1, %val

@@ -1,4 +1,4 @@
-; RUN: opt -passes='firv2' -load-pass-plugin=../build/lib/LLVMFirv2.so %s -S -o %t.ll
+; RUN: opt -passes='firv2-internal' -load-pass-plugin=../build/lib/LLVMFirv2.so %s -S -o %t.ll
 ; RUN: clang %t.ll -o %t.out
 ; RUN: %t.out
 ; RUN: cat %t.ll | FileCheck %s
@@ -14,7 +14,7 @@ define void @foo() {
 
 declare void @internal_firv2_0_identifier()
 
-; CHECK-LABEL: original.main
+; CHECK-LABEL: main.original
 define dso_local i32 @main() {
   ; CHECK-NOT: internal_firv2_0_identifier 
   call void @internal_firv2_0_identifier()
@@ -31,7 +31,7 @@ start:
 }
 
 ; CHECK-LABEL: main
-; CHECK-2: call i32 @original.main()
+; CHECK-2: call i32 @main.original()
 ; CHECK: call i1 @internal_firv2_0_eq
 ; CHECK: br i1
 

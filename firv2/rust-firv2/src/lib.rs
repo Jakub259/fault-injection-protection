@@ -88,7 +88,9 @@ fn insert_type_check(item_fn: &mut ItemFn, eq_fn: &str) {
         0,
         syn::parse_quote! {
         {
-            // unused function to check types
+            // this function is never called, thus not a problem
+            #[allow(improper_ctypes)]
+            // intentionally unused function to check types
             #[allow(dead_code)]
             fn type_check() -> bool {
                 extern "C" {fn type_check_fn_mock() -> #item_fn_return_type;}
