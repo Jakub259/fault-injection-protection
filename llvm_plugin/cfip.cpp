@@ -31,15 +31,24 @@ void getUsersRec(Value *const User, DenseSet<Value *> &OutSV) {
     toProcess.pop_back();
 
     if (OutSV.insert(currentUser).second) {
+      // taint all users
       for (auto *user : currentUser->users()) {
         toProcess.push_back(user);
       }
     }
 
+    // it's impossible to tell what the function actually does with parameters
+    // when it's just a declaration, thus we assume that all operands are
+    // tainted
     if (auto ci = dyn_cast<CallBase>(currentUser)) {
-      if (ci->getCalledFunction()->getName().starts_with("llvm.memcpy"))
-        toProcess.push_back(ci->getOperand(0));
+      auto called_fn = ci->getCalledFunction();
+      if (called_fn->isDeclaration())
+        for (unsigned int i = 0; i < called_fn->getNumOperands(); ++i)
+          toProcess.push_back(called_fn->getOperand(i));
     }
+
+    // store instructions do not return the value, but rather store it
+    // thus we need to taint the stored value
     if (auto st = dyn_cast<StoreInst>(currentUser)) {
       toProcess.push_back(st->getOperand(1));
     }
@@ -62,7 +71,8 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
                     bool atomic_state, llvm::BasicBlock *error_bb,
                     DenseSet<Value *> *users_of_critical_values = nullptr,
                     DenseSet<Function *> *cloned_functions = nullptr) {
-  // the cloned_functions must be present if users_of_critical_values is present
+  // the cloned_functions must be present if users_of_critical_values is
+  // present
   assert(!users_of_critical_values || cloned_functions);
   auto *instruction = dyn_cast<Instruction>(user);
   if (!instruction) {
@@ -575,7 +585,8 @@ template <auto Fn> struct Cfip : PassInfoMixin<Cfip<Fn>> {
   static bool isRequired() { return true; }
 };
 
-size_t harden_all(Function &function, DenseSet<Function *> *cloned_functions,
+size_t harden_all(Function &function,
+                  [[maybe_unused]] DenseSet<Function *> *cloned_functions,
                   bool atomic_state, bool check_asap) {
   LLVMContext &Ctx = function.getContext();
   auto inst_cnt = function.getInstructionCount();

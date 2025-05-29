@@ -118,7 +118,7 @@ struct Firv2 : PassInfoMixin<Firv2> {
     error_builder.CreateUnreachable();
   }
 
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
+  PreservedAnalyses run(Module &M, [[maybe_unused]] ModuleAnalysisManager &AM) {
     SmallVector<std::pair<Value *, StringRef>> hardening_requests;
 
     for (auto &function : M) {
