@@ -77,30 +77,6 @@ fn insert_identifier_call(item_fn: &mut ItemFn, function_name: &str) {
     );
 }
 
-fn insert_type_check(item_fn: &mut ItemFn, eq_fn: &str) {
-    let eq_fn = syn::Ident::new(eq_fn, Span::call_site().into());
-    let ReturnType::Type(_, return_type) = &item_fn.sig.output else {
-        panic!()
-    };
-    let item_fn_return_type = dereference_type(&return_type);
-
-    item_fn.block.stmts.insert(
-        0,
-        syn::parse_quote! {
-        {
-            // this function is never called, thus not a problem
-            #[allow(improper_ctypes)]
-            // intentionally unused function to check types
-            #[allow(dead_code)]
-            fn type_check() -> bool {
-                extern "C" {fn type_check_fn_mock() -> #item_fn_return_type;}
-                let x = unsafe { type_check_fn_mock() };
-                return #eq_fn (&x, &x);
-            }
-        }
-        },
-    );
-}
 #[proc_macro_attribute]
 pub fn harden_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_fn = syn::parse_macro_input!(item as syn::ItemFn);
@@ -115,7 +91,6 @@ pub fn harden_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     insert_identifier_function(&mut item_fn, &identifier_function_name);
     insert_eq_function(&mut item_fn, &user_eq_name, &eq_fn);
-    insert_type_check(&mut item_fn, &eq_fn);
     insert_identifier_call(&mut item_fn, &identifier_function_name);
 
     item_fn.to_token_stream().into()
