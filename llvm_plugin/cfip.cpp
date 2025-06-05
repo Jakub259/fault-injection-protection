@@ -4,6 +4,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
@@ -86,18 +87,13 @@ size_t harden_fn_args(Function *function,
                       DenseSet<Function *> *cloned_functions, bool atomic_state,
                       bool check_asap, SmallVector<unsigned> &args);
 
-bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
+bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Instruction *instruction,
                     bool atomic_state, llvm::BasicBlock *error_bb,
                     DenseSet<Value *> *users_of_critical_values = nullptr,
                     DenseSet<Function *> *cloned_functions = nullptr) {
   // the cloned_functions must be present if users_of_critical_values is
   // present
   assert(!users_of_critical_values || cloned_functions);
-  auto *instruction = dyn_cast<Instruction>(user);
-  if (!instruction) {
-    /* errs() << "Skipping non-instruction: " << *instruction << "\n"; */
-    return false;
-  }
 
   if (users_of_critical_values) {
     if (auto *call_inst = dyn_cast<CallBase>(instruction)) {
