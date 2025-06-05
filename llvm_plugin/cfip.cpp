@@ -5,6 +5,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
@@ -22,37 +23,55 @@ using namespace llvm;
 
 namespace {
 
-void getUsersRec(Value *const User, DenseSet<Value *> &OutSV) {
+void getUsersRec(Value *const User, DenseSet<Value *> &All,
+                 DenseSet<Instruction *> &Insts) {
   std::vector<Value *> toProcess;
+  DenseSet<Value *> visited;
   toProcess.push_back(User);
 
   while (!toProcess.empty()) {
     Value *currentUser = toProcess.back();
     toProcess.pop_back();
 
-    if (OutSV.insert(currentUser).second) {
-      // taint all users
-      for (auto *user : currentUser->users()) {
+    // Skip if already processed
+    if (!visited.insert(currentUser).second) {
+      continue;
+    }
+
+    if (auto inst = dyn_cast<Instruction>(currentUser)) {
+      Insts.insert(inst);
+    }
+
+    All.insert(currentUser);
+
+    for (auto *user : currentUser->users()) {
+      if (!visited.count(user))
         toProcess.push_back(user);
-      }
     }
 
     // it's impossible to tell what the function actually does with parameters
-    // when it's just a declaration, thus we assume that all operands are
-    // tainted
+    // when it's just a declaration, thus we assume that all pointer operands
+    // are tainted
     if (auto ci = dyn_cast<CallBase>(currentUser)) {
       auto called_fn = ci->getCalledFunction();
-      if (called_fn->isDeclaration())
-        for (unsigned int i = 0; i < called_fn->getNumOperands(); ++i)
-          toProcess.push_back(called_fn->getOperand(i));
+
+      if (called_fn->isDeclaration()) {
+        for (unsigned i = 0; i < ci->arg_size(); ++i) {
+          auto arg = ci->getArgOperand(i);
+          if (arg->getType()->isPointerTy() && !visited.contains(arg)) {
+            toProcess.push_back(arg);
+          }
+        }
+      }
     }
 
     // store instructions do not return the value, but rather store it
-    // thus we need to taint the stored value
+    // thus we need to taint the pointer where it was stored
     if (auto st = dyn_cast<StoreInst>(currentUser)) {
-      toProcess.push_back(st->getOperand(1));
+      toProcess.push_back(st->getPointerOperand());
     }
   }
+  errs() << "Users collected: " << All.size() << "\n";
 }
 
 std::string makeHardenedFunctionNameSuffix(SmallVector<unsigned> &args) {
@@ -84,14 +103,18 @@ bool add_redundancy(llvm::Instruction *fault_detected_ptr, llvm::Value *user,
     if (auto *call_inst = dyn_cast<CallBase>(instruction)) {
       errs() << "CALL: " << *call_inst << '\n';
       auto *called_fn = call_inst->getCalledFunction();
+      if (!called_fn) {
+        errs() << "Skipping indirect call: " << *call_inst << "\n";
+        return false;
+      }
       if (called_fn->isDeclaration()) {
         errs() << "Skipping declaration: " << called_fn->getName() << "\n";
         return false;
       }
       SmallVector<unsigned> args{};
 
-      for (unsigned i = 0; i < call_inst->getNumOperands(); i++) {
-        auto *operand = call_inst->getOperand(i);
+      for (unsigned i = 0; i < call_inst->arg_size(); i++) {
+        auto *operand = call_inst->getArgOperand(i);
         if (users_of_critical_values->contains(operand)) {
           args.push_back(i);
         }
@@ -443,8 +466,9 @@ size_t harden_fn_args(Function *function,
   auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
   DenseSet<Value *> users_of_critical_values;
+  DenseSet<Instruction *> insts;
   for (const auto &arg : args) {
-    getUsersRec(function->getArg(arg), users_of_critical_values);
+    getUsersRec(function->getArg(arg), users_of_critical_values, insts);
   }
   if (users_of_critical_values.empty()) {
     return 0;
@@ -452,11 +476,8 @@ size_t harden_fn_args(Function *function,
 
   auto *error_bb = insert_error_bb(*function);
 
-  std::vector worklist(users_of_critical_values.begin(),
-                       users_of_critical_values.end());
-
   bool modified = false;
-  for (auto *user : worklist) {
+  for (auto *user : insts) {
     modified |= add_redundancy(fault_detected_ptr, user, atomic_state,
                                check_asap ? error_bb : nullptr,
                                &users_of_critical_values, cloned_functions);
@@ -485,6 +506,8 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
   auto *fault_detected_ptr = insert_bool(alloca_builder, Ctx);
 
   DenseSet<Value *> users_of_critical_values;
+  DenseSet<Instruction *> insts;
+
   for (auto &opaque_call : opaque_calls) {
     auto *critical_value_use = unwrap_call(opaque_call, alloca_builder);
     if (critical_value_use->use_empty()) {
@@ -492,7 +515,7 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
       continue;
     }
 
-    getUsersRec(critical_value_use, users_of_critical_values);
+    getUsersRec(critical_value_use, users_of_critical_values, insts);
   }
 
   if (users_of_critical_values.empty()) {
@@ -502,7 +525,7 @@ size_t harden_chosen(Function &function, DenseSet<Function *> *cloned_functions,
   auto *error_bb = insert_error_bb(function);
 
   bool modified = false;
-  for (auto *user : users_of_critical_values) {
+  for (auto *user : insts) {
     modified |= add_redundancy(fault_detected_ptr, user, atomic_state,
                                check_asap ? error_bb : nullptr,
                                &users_of_critical_values, cloned_functions);
